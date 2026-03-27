@@ -1,0 +1,39 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Harness workspace (generated per-project, not part of plugin)
+.claude/
+
+# Research artifacts (not part of plugin)
+docs/research-report/
+
+# Secrets
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.bak
+*.log
