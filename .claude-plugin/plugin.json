@@ -1,0 +1,25 @@
+{
+  "name": "ahoy",
+  "description": "Adversarial Harness for Objective Yielding — Generator-Evaluator separation with external model consensus for AI coding agents",
+  "version": "0.1.0",
+  "author": {
+    "name": "mullung2"
+  },
+  "repository": "mullung2/ahoy",
+  "homepage": "https://github.com/mullung2/ahoy",
+  "license": "MIT",
+  "keywords": [
+    "evaluation",
+    "adversarial",
+    "consensus",
+    "code-quality",
+    "generator-evaluator"
+  ],
+  "skills": [
+    "skills/ahoy/SKILL.md",
+    "skills/ahoy-setup/SKILL.md",
+    "skills/ahoy-plan/SKILL.md",
+    "skills/ahoy-gen/SKILL.md",
+    "skills/ahoy-eval/SKILL.md"
+  ]
+}

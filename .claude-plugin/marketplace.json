@@ -1,0 +1,11 @@
+{
+  "name": "ahoy-marketplace",
+  "description": "Marketplace for AHOY — Adversarial Harness for Objective Yielding",
+  "plugins": [
+    {
+      "name": "ahoy",
+      "description": "Generator-Evaluator separation with external model consensus for AI coding agents",
+      "source": "./"
+    }
+  ]
+}
