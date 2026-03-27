@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 260" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="psBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a" />
+      <stop offset="100%" style="stop-color:#1e293b" />
+    </linearGradient>
+    <filter id="psShadow" x="-5%" y="-5%" width="115%" height="115%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="820" height="260" rx="16" fill="url(#psBg)"/>
+  <rect x="1" y="1" width="818" height="258" rx="15" fill="none" stroke="#334155" stroke-width="1"/>
+
+  <!-- Problem side -->
+  <rect x="30" y="20" width="370" height="220" rx="12" fill="#1e293b" stroke="#ef4444" stroke-width="1.5" opacity="0.8"/>
+  <text x="215" y="50" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">Conventional Approach</text>
+
+  <rect x="110" y="70" width="210" height="44" rx="10" fill="#334155" stroke="#3b82f6" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="215" y="97" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="600">Claude (Generator)</text>
+
+  <!-- Arrow down -->
+  <line x1="215" y1="114" x2="215" y2="136" stroke="#64748b" stroke-width="2"/>
+  <polygon points="210,134 215,144 220,134" fill="#64748b"/>
+
+  <rect x="110" y="146" width="210" height="44" rx="10" fill="#334155" stroke="#3b82f6" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="215" y="173" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="600">Claude (Evaluator)</text>
+
+  <!-- Same context badge -->
+  <rect x="100" y="196" width="230" height="24" rx="5" fill="#ef4444" opacity="0.2"/>
+  <text x="215" y="213" text-anchor="middle" fill="#fca5a5" font-size="10" font-weight="600">same model, same context = bias</text>
+
+  <!-- Brace connecting -->
+  <rect x="325" y="78" width="4" height="104" rx="2" fill="#ef4444" opacity="0.5"/>
+
+  <text x="355" y="134" fill="#fca5a5" font-size="22" font-weight="300">}</text>
+  <text x="55" y="134" fill="#ef4444" font-size="20">X</text>
+
+  <!-- VS divider -->
+  <rect x="405" y="105" width="32" height="32" rx="16" fill="#475569"/>
+  <text x="421" y="127" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="700">vs</text>
+
+  <!-- Solution side -->
+  <rect x="442" y="20" width="370" height="220" rx="12" fill="#1e293b" stroke="#22c55e" stroke-width="1.5" opacity="0.8"/>
+  <text x="627" y="50" text-anchor="middle" fill="#86efac" font-size="14" font-weight="700">AHOY</text>
+
+  <rect x="522" y="70" width="210" height="44" rx="10" fill="#334155" stroke="#3b82f6" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="627" y="97" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="600">Claude (Generator)</text>
+
+  <!-- Arrow down -->
+  <line x1="627" y1="114" x2="627" y2="136" stroke="#64748b" stroke-width="2"/>
+  <polygon points="622,134 627,144 632,134" fill="#64748b"/>
+
+  <!-- External Models -->
+  <rect x="480" y="146" width="100" height="38" rx="8" fill="#334155" stroke="#ef4444" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="530" y="170" text-anchor="middle" fill="#fca5a5" font-size="11" font-weight="600">Codex</text>
+
+  <rect x="590" y="146" width="100" height="38" rx="8" fill="#334155" stroke="#ef4444" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="640" y="170" text-anchor="middle" fill="#fca5a5" font-size="11" font-weight="600">Gemini</text>
+
+  <rect x="700" y="146" width="100" height="38" rx="8" fill="#334155" stroke="#ef4444" stroke-width="1.5" filter="url(#psShadow)"/>
+  <text x="750" y="170" text-anchor="middle" fill="#fca5a5" font-size="11" font-weight="600">Claude*</text>
+
+  <!-- Separate process badge -->
+  <rect x="500" y="196" width="260" height="24" rx="5" fill="#22c55e" opacity="0.2"/>
+  <text x="630" y="213" text-anchor="middle" fill="#86efac" font-size="10" font-weight="600">separate process, no shared context</text>
+
+  <text x="467" y="134" fill="#22c55e" font-size="20" font-weight="700">O</text>
+</svg>

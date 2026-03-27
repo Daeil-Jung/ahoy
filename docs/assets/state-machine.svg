@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 320" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="smBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a" />
+      <stop offset="100%" style="stop-color:#1e293b" />
+    </linearGradient>
+    <filter id="smShadow" x="-5%" y="-5%" width="115%" height="115%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <marker id="smArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="smArrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#22c55e"/>
+    </marker>
+    <marker id="smArrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ef4444"/>
+    </marker>
+    <marker id="smArrowAmber" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f59e0b"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="320" rx="16" fill="url(#smBg)"/>
+  <rect x="1" y="1" width="818" height="318" rx="15" fill="none" stroke="#334155" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="410" y="35" text-anchor="middle" fill="#f8fafc" font-size="16" font-weight="700">Sprint State Machine</text>
+
+  <!-- === Main flow nodes === -->
+
+  <!-- planned -->
+  <rect x="30" y="110" width="120" height="48" rx="24" fill="#334155" stroke="#6366f1" stroke-width="2" filter="url(#smShadow)"/>
+  <text x="90" y="139" text-anchor="middle" fill="#c7d2fe" font-size="13" font-weight="700">planned</text>
+
+  <!-- contracted -->
+  <rect x="200" y="110" width="130" height="48" rx="24" fill="#334155" stroke="#3b82f6" stroke-width="2" filter="url(#smShadow)"/>
+  <text x="265" y="139" text-anchor="middle" fill="#bfdbfe" font-size="13" font-weight="700">contracted</text>
+
+  <!-- generated -->
+  <rect x="380" y="110" width="130" height="48" rx="24" fill="#334155" stroke="#f59e0b" stroke-width="2" filter="url(#smShadow)"/>
+  <text x="445" y="139" text-anchor="middle" fill="#fde68a" font-size="13" font-weight="700">generated</text>
+
+  <!-- passed -->
+  <rect x="570" y="110" width="110" height="48" rx="24" fill="#334155" stroke="#22c55e" stroke-width="2.5" filter="url(#smShadow)"/>
+  <text x="625" y="139" text-anchor="middle" fill="#86efac" font-size="13" font-weight="700">passed</text>
+
+  <!-- next sprint -->
+  <rect x="720" y="110" width="80" height="48" rx="24" fill="#22c55e" filter="url(#smShadow)"/>
+  <text x="760" y="132" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">next</text>
+  <text x="760" y="146" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">sprint</text>
+
+  <!-- === Arrows: main flow === -->
+  <line x1="150" y1="134" x2="196" y2="134" stroke="#64748b" stroke-width="2" marker-end="url(#smArrow)"/>
+  <line x1="330" y1="134" x2="376" y2="134" stroke="#64748b" stroke-width="2" marker-end="url(#smArrow)"/>
+  <line x1="510" y1="134" x2="566" y2="134" stroke="#64748b" stroke-width="2" marker-end="url(#smArrow)"/>
+  <line x1="680" y1="134" x2="716" y2="134" stroke="#22c55e" stroke-width="2" marker-end="url(#smArrowGreen)"/>
+
+  <!-- === Fail path === -->
+
+  <!-- failed -->
+  <rect x="450" y="220" width="110" height="48" rx="24" fill="#334155" stroke="#ef4444" stroke-width="2" filter="url(#smShadow)"/>
+  <text x="505" y="249" text-anchor="middle" fill="#fca5a5" font-size="13" font-weight="700">failed</text>
+
+  <!-- rework -->
+  <rect x="270" y="220" width="120" height="48" rx="24" fill="#334155" stroke="#f59e0b" stroke-width="2" filter="url(#smShadow)"/>
+  <text x="330" y="249" text-anchor="middle" fill="#fde68a" font-size="13" font-weight="700">rework</text>
+
+  <!-- Arrow: generated → failed -->
+  <line x1="475" y1="158" x2="500" y2="216" stroke="#ef4444" stroke-width="2" marker-end="url(#smArrowRed)"/>
+  <text x="510" y="190" fill="#fca5a5" font-size="9" font-weight="600">fail</text>
+
+  <!-- Arrow: failed → rework -->
+  <line x1="450" y1="244" x2="394" y2="244" stroke="#f59e0b" stroke-width="2" marker-end="url(#smArrowAmber)"/>
+  <text x="422" y="237" fill="#fde68a" font-size="9">attempt &lt; 3</text>
+
+  <!-- Arrow: rework → generated (curved up) -->
+  <path d="M 330 220 L 330 185 Q 330 170 345 170 L 376 155" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#smArrowAmber)"/>
+
+  <!-- === Skipped path === -->
+
+  <!-- skipped -->
+  <rect x="70" y="220" width="110" height="48" rx="24" fill="#334155" stroke="#64748b" stroke-width="1.5" filter="url(#smShadow)"/>
+  <text x="125" y="249" text-anchor="middle" fill="#94a3b8" font-size="13" font-weight="700">skipped</text>
+
+  <!-- Arrow: planned → skipped -->
+  <line x1="90" y1="158" x2="110" y2="216" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#smArrow)"/>
+
+  <!-- === Phase labels === -->
+  <rect x="570" y="265" width="80" height="22" rx="4" fill="#22c55e" opacity="0.15"/>
+  <text x="610" y="281" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="600">complete</text>
+
+  <rect x="650" y="265" width="80" height="22" rx="4" fill="#ef4444" opacity="0.15"/>
+  <text x="690" y="281" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="600">aborted</text>
+
+  <rect x="490" y="265" width="80" height="22" rx="4" fill="#3b82f6" opacity="0.15"/>
+  <text x="530" y="281" text-anchor="middle" fill="#3b82f6" font-size="9" font-weight="600">sprinting</text>
+
+  <text x="530" y="305" fill="#64748b" font-size="9">phase values</text>
+</svg>
