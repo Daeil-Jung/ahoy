@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/ahoy_logo.png" alt="AHOY Logo" width="200"/>
+
 # AHOY
 
 ### Adversarial Harness for Objective Yielding
