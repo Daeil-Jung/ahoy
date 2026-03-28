@@ -578,6 +578,15 @@ def audit_final_scope() -> None:
     if not allowed and not preserve:
         return  # No scope defined, pass through
 
+    # Check if HEAD exists (fresh repos have no commits)
+    head_check = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head_check.returncode != 0:
+        print("[validate_harness] audit_final_scope: HEAD not found (unborn repo), skipping scope audit", file=sys.stderr)
+        return
+
     # Collect changed files via git diff against HEAD
     git_commands = [
         ("git diff", ["git", "diff", "--name-only", "HEAD"]),
@@ -611,8 +620,14 @@ def audit_final_scope() -> None:
             if stripped:
                 changed_files.add(stripped.replace("\\", "/"))
 
-    # Filter out harness-internal files — always allowed
-    user_changed = [f for f in sorted(changed_files) if not f.startswith(".claude/harness/")]
+    # Filter out harness-internal files and plugin-root files — always allowed
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    plugin_root_normalized = plugin_root.replace("\\", "/") if plugin_root else ""
+    user_changed = [
+        f for f in sorted(changed_files)
+        if not f.startswith(".claude/harness/")
+        and not (plugin_root_normalized and f.startswith(plugin_root_normalized))
+    ]
 
     # Check preserved files for unauthorized modifications
     preserved_violations = [
