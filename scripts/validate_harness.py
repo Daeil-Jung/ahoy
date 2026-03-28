@@ -12,12 +12,12 @@ Usage: validate_harness.py <check_type>
     pre-gen              — Before Generator execution: verify contract.md exists
     post-eval            — After evaluation: verify external model verdict in issues.json
     guard-eval-files     — Block direct writing of issues.json (only eval_dispatch.py allowed)
+    audit-final-scope    — Before generated transition: verify all modified files are within contract scope
     pre-commit           — Run tests, lint, and type check before commit (only in harness mode)
     pre-push             — Run tests, lint, type check + verify state consistency before push
     post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
     circuit-breaker      — Detect repeated failure patterns across rework attempts
 """
-
 from __future__ import annotations
 
 import json
@@ -590,6 +590,18 @@ def check_pre_push() -> None:
     info("[HARNESS-GUARD] Passed: Harness state consistency confirmed — push allowed")
 
 
+def _path_matches_scope_entry(file_path: str, scope_entry: str) -> bool:
+    """Check whether *file_path* matches a single scope entry.
+
+    Both values must already be forward-slash normalised.
+    """
+    return (
+        file_path == scope_entry
+        or file_path.endswith("/" + scope_entry)
+        or scope_entry in file_path
+    )
+
+
 def parse_scope_from_contract(contract_path: Path) -> tuple[list[str], list[str], list[str]]:
     """Parse Implementation Scope from contract.md.
 
@@ -680,8 +692,7 @@ def check_scope() -> None:
 
     # Files to Preserve are explicitly blocked
     for p in preserve:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             fail(
                 f"[HARNESS-GUARD] Blocked: '{file_path}' is listed in Files to Preserve\n"
                 "[HARNESS-GUARD] This file is protected by the sprint contract and must not be modified."
@@ -693,8 +704,7 @@ def check_scope() -> None:
         return  # No scope defined, pass through
 
     for p in allowed:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             return  # File is in scope
 
     # Check if file is part of the AHOY plugin itself — always allow
@@ -709,6 +719,113 @@ def check_scope() -> None:
         f"[HARNESS-GUARD] Allowed files: {', '.join(allowed)}\n"
         "[HARNESS-GUARD] Only create/modify files specified in the sprint contract."
     )
+
+
+def audit_final_scope() -> None:
+    """Audit all modified files against contract scope before generated transition.
+
+    Complements check_scope() (per-file Edit/Write guard) by scanning the full
+    git diff at state-transition time so nothing slips through.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    current_status = get_current_status(state)
+
+    if not current_sprint:
+        return  # No active sprint
+    if current_status != "generated":
+        return  # Only audit on transitions from generated state
+
+    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
+    if not contract_path.exists():
+        return  # No contract yet
+
+    create, modify, preserve = parse_scope_from_contract(contract_path)
+    allowed = create + modify
+    if not allowed and not preserve:
+        return  # No scope defined, pass through
+
+    # Check if HEAD exists (fresh repos have no commits)
+    head_check = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head_check.returncode != 0:
+        print("[validate_harness] audit_final_scope: HEAD not found (unborn repo), skipping scope audit", file=sys.stderr)
+        return
+
+    # Collect changed files via git diff against HEAD
+    git_commands = [
+        ("git diff", ["git", "diff", "--name-only", "HEAD"]),
+        ("git diff --cached", ["git", "diff", "--name-only", "--cached"]),
+    ]
+
+    outputs: list[str] = []
+    for label, cmd in git_commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as exc:
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label}: {exc}) "
+                "— cannot verify file changes, blocking transition"
+            )
+            return  # unreachable; helps static analysis see proc is always bound
+        if proc.returncode != 0:
+            stderr_hint = (proc.stderr or "").strip()[:200]
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label} exited {proc.returncode}"
+                f"{': ' + stderr_hint if stderr_hint else ''}) "
+                "— cannot verify file changes, blocking transition"
+            )
+        outputs.append(proc.stdout)
+
+    changed_files: set[str] = set()
+    for output in outputs:
+        for line in output.strip().splitlines():
+            stripped = line.strip()
+            if stripped:
+                changed_files.add(stripped.replace("\\", "/"))
+
+    # Filter out harness-internal files and plugin-root files — always allowed
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    plugin_root_normalized = plugin_root.replace("\\", "/") if plugin_root else ""
+    user_changed = [
+        f for f in sorted(changed_files)
+        if not f.startswith(".claude/harness/")
+        and not (plugin_root_normalized and f.startswith(plugin_root_normalized))
+    ]
+
+    # Check preserved files for unauthorized modifications
+    preserved_violations = [
+        f for f in user_changed
+        if any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in preserve)
+    ]
+
+    if preserved_violations:
+        fail(
+            "[HARNESS-GUARD] Blocked: Files to Preserve were modified:\n"
+            + "\n".join(f"  - {f}" for f in preserved_violations)
+            + "\n[HARNESS-GUARD] These files are protected by the sprint contract and must not be modified.\n"
+            "[HARNESS-GUARD] Revert changes to preserved files before transitioning."
+        )
+
+    # Check for files outside the allowed scope (create + modify)
+    out_of_scope: list[str] = []
+    if allowed:
+        out_of_scope = [
+            f for f in user_changed
+            if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed)
+        ]
+
+    if out_of_scope:
+        fail(
+            "[HARNESS-GUARD] Blocked: Intent-Action mismatch — files outside contract scope were modified:\n"
+            + "\n".join(f"  - {f}" for f in out_of_scope)
+            + f"\n[HARNESS-GUARD] Allowed scope: {', '.join(allowed)}\n"
+            "[HARNESS-GUARD] Revert out-of-scope changes or update the contract before transitioning to generated."
+        )
+
+    info("[HARNESS-GUARD] Passed: All modified files are within contract scope")
 
 
 # ── Post-edit quality patterns ─────────────────────────────────
@@ -851,6 +968,7 @@ CHECKS = {
     "pre-gen": check_pre_gen,
     "post-eval": check_post_eval,
     "guard-eval-files": check_guard_eval_files,
+    "audit-final-scope": audit_final_scope,
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
     "post-edit-quality": check_post_edit_quality,
