@@ -15,6 +15,7 @@ Usage: validate_harness.py <check_type>
     pre-commit           — Run tests, lint, and type check before commit (only in harness mode)
     pre-push             — Run tests, lint, type check + verify state consistency before push
     post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
+    circuit-breaker      — Detect repeated failure patterns across rework attempts
 """
 
 from __future__ import annotations
@@ -220,6 +221,171 @@ def fail(msg: str) -> None:
 
 def info(msg: str) -> None:
     print(msg)
+
+
+# ── Failure pattern detection (circuit breaker) ────────────────
+
+
+_FAILURE_PATTERNS: dict[str, list[str]] = {
+    "scope_violation": ["scope", "out of scope", "outside", "not in contract"],
+    "test_failure": ["test", "assert", "expect", "fail"],
+    "stub_remaining": ["stub", "todo", "not implemented", "placeholder", "fixme"],
+    "type_error": ["type", "typeerror", "typing", "annotation", "incompatible"],
+    "logic_error": ["logic", "incorrect", "wrong", "bug", "regression"],
+}
+
+
+def classify_failure_type(issues: list[dict]) -> list[str]:
+    """Classify each issue into a failure pattern category.
+
+    Inspects the ``category`` and ``description`` fields of each issue dict
+    and returns a list of matched pattern labels.
+    """
+    matched: list[str] = []
+    for issue in issues:
+        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
+        for label, keywords in _FAILURE_PATTERNS.items():
+            if any(kw in text for kw in keywords):
+                matched.append(label)
+                break
+        else:
+            matched.append("other")
+    return matched
+
+
+def _issues_signature(issues: list[dict]) -> set[str]:
+    """Build a set of comparable signatures from issue dicts.
+
+    Uses ``(category, description)`` as the identity key so that two
+    issues with the same category and description are considered identical.
+    """
+    return {
+        f"{issue.get('category', '').strip().lower()}::{issue.get('description', '').strip().lower()}"
+        for issue in issues
+    }
+
+
+def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
+    """Load issues from a specific attempt backup file.
+
+    The convention is ``issues.json.attempt-N`` for archived attempts, while
+    ``issues.json`` always holds the *current* attempt.
+
+    Returns an empty list when no backup file exists — falling back to the
+    current ``issues.json`` would cause self-comparison and false circuit
+    breaks.
+    """
+    attempt_path = sprint_dir / f"issues.json.attempt-{attempt}"
+    if attempt_path.exists():
+        data = load_json(attempt_path)
+        if data and isinstance(data.get("issues"), list):
+            return data["issues"]
+
+    print(
+        f"[validate_harness] No previous attempt issues found at {attempt_path}, "
+        f"skipping circuit breaker comparison",
+        file=sys.stderr,
+    )
+    return []
+
+
+def detect_failure_pattern(sprint_dir: Path, current_attempt: int) -> dict:
+    """Compare current and previous attempt issues for repeated failures.
+
+    Returns a dict with at least ``circuit_break`` (bool).  When True, the
+    dict also contains ``repeated_issues`` and ``recommendation``.
+    """
+    if current_attempt < 2:
+        return {"circuit_break": False}
+
+    # Load current issues
+    current_file = sprint_dir / "issues.json"
+    current_data = load_json(current_file)
+    if not current_data or not isinstance(current_data.get("issues"), list):
+        return {"circuit_break": False}
+    current_issues: list[dict] = current_data["issues"]
+
+    # Load previous attempt issues
+    prev_issues = _load_attempt_issues(sprint_dir, current_attempt - 1)
+    if not prev_issues:
+        return {"circuit_break": False}
+
+    current_sigs = _issues_signature(current_issues)
+    prev_sigs = _issues_signature(prev_issues)
+
+    repeated = current_sigs & prev_sigs
+    if not repeated:
+        return {"circuit_break": False}
+
+    # Build human-readable repeated issue list
+    repeated_descriptions = [sig.split("::", 1)[-1] for sig in repeated]
+    failure_types = classify_failure_type(current_issues)
+
+    return {
+        "circuit_break": True,
+        "repeated_issues": sorted(repeated_descriptions),
+        "failure_types": sorted(set(failure_types)),
+        "recommendation": "failed",
+    }
+
+
+def check_circuit_breaker() -> None:
+    """Detect repeated failure patterns across rework attempts.
+
+    This check runs after evaluation.  If the same issues appear in two
+    consecutive attempts it blocks the transition via ``fail()`` and outputs
+    the failure pattern as structured JSON to stdout so the orchestrator can
+    read and persist it.
+
+    ``validate_harness.py`` must NOT write ``harness_state.json`` directly —
+    state writes are the orchestrator's responsibility.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    if not current_sprint:
+        return
+
+    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+
+    # Skip circuit breaker if the current evaluation passed
+    current_issues = load_json(sprint_dir / "issues.json")
+    if current_issues and current_issues.get("status_action") == "passed":
+        print("[validate_harness] Circuit breaker skipped — status_action is passed", file=sys.stderr)
+        return
+
+    idx = state.get("current_sprint_index", 0)
+    sprint_obj = state["sprints"][idx]
+    current_attempt = sprint_obj.get("attempt", 0)
+
+    # Archive current issues.json as issues.json.attempt-{N} before comparison.
+    # This makes the current attempt's issues available for the NEXT rework cycle.
+    issues_file = sprint_dir / "issues.json"
+    if issues_file.exists() and current_attempt >= 1:
+        backup_path = sprint_dir / f"issues.json.attempt-{current_attempt}"
+        if not backup_path.exists():
+            shutil.copy2(issues_file, backup_path)
+            print(
+                f"[validate_harness] Archived {issues_file.name} as {backup_path.name}",
+                file=sys.stderr,
+            )
+
+    pattern = detect_failure_pattern(sprint_dir, current_attempt)
+
+    # Output the pattern as structured JSON so the orchestrator can persist it
+    print(json.dumps({"circuit_breaker_result": pattern}))
+
+    if pattern.get("circuit_break"):
+        repeated = pattern.get("repeated_issues", [])
+        ftypes = pattern.get("failure_types", [])
+        fail(
+            "[HARNESS-GUARD] Blocked: Circuit breaker triggered — repeated failure pattern detected\n"
+            f"[HARNESS-GUARD]   Repeated issues: {', '.join(repeated)}\n"
+            f"[HARNESS-GUARD]   Failure types: {', '.join(ftypes)}\n"
+            "[HARNESS-GUARD]   Recommendation: mark sprint as 'failed' instead of continuing rework.\n"
+            "[HARNESS-GUARD]   The same issues have appeared in consecutive attempts — further rework is unlikely to help."
+        )
+    else:
+        info("[HARNESS-GUARD] Passed: No repeated failure pattern detected")
 
 
 # ── Check handlers ──────────────────────────────────────────────
@@ -688,6 +854,7 @@ CHECKS = {
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
     "post-edit-quality": check_post_edit_quality,
+    "circuit-breaker": check_circuit_breaker,
 }
 
 
