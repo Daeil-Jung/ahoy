@@ -15,11 +15,5 @@
     "code-quality",
     "generator-evaluator"
   ],
-  "skills": [
-    "skills/ahoy/SKILL.md",
-    "skills/ahoy-setup/SKILL.md",
-    "skills/ahoy-plan/SKILL.md",
-    "skills/ahoy-gen/SKILL.md",
-    "skills/ahoy-eval/SKILL.md"
-  ]
+  "skills": "./skills/"
 }
