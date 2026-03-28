@@ -398,6 +398,60 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
     }
 
 
+def check_verdict_conflict(verdicts: dict[str, dict]) -> bool:
+    """Check if valid model verdicts conflict (mix of pass and fail).
+
+    Returns True if there is a conflict, False if unanimous.
+    Models with verdict 'error' are excluded from the check.
+    """
+    valid_verdicts = {
+        v.get("verdict")
+        for v in verdicts.values()
+        if v.get("verdict") not in ("error", None)
+    }
+    # Conflict means at least two different verdict values among valid models
+    return len(valid_verdicts) > 1
+
+
+def build_round2_prompt(base_prompt: str, round1_verdicts: dict[str, dict]) -> str:
+    """Build a round-2 prompt that includes round-1 verdicts and reasoning.
+
+    Uses the same JSON response schema as round 1.
+    """
+    round1_summary_parts: list[str] = []
+    for model, result in round1_verdicts.items():
+        if result.get("verdict") == "error":
+            continue
+        verdict = result.get("verdict", "unknown")
+        summary = result.get("summary", "No summary provided")
+        reasoning_issues = result.get("issues", [])
+        issues_text = ""
+        if reasoning_issues:
+            issue_lines = [
+                f"  - [{iss.get('severity', '?')}] {iss.get('description', 'N/A')}"
+                for iss in reasoning_issues[:10]
+            ]
+            issues_text = "\n".join(issue_lines)
+        round1_summary_parts.append(
+            f"### {model}\n- Verdict: {verdict}\n- Summary: {summary}"
+            + (f"\n- Issues:\n{issues_text}" if issues_text else "")
+        )
+
+    round1_block = "\n\n".join(round1_summary_parts)
+
+    return f"""{base_prompt}
+
+---
+
+## Round 2 — Cross-Verification
+
+The following models provided conflicting assessments in Round 1. Review their reasoning and provide your independent verdict:
+
+{round1_block}
+
+Given the conflicting assessments above, re-examine the code against the contract criteria and provide your own independent verdict. Respond ONLY in the same JSON format specified above."""
+
+
 def load_config() -> dict:
     """Load ahoy_config.json from plugin root if available."""
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
@@ -468,10 +522,10 @@ def main() -> int:
     print(f"[eval_dispatch] Evaluation models: {models} (parallel calls)", file=sys.stderr)
     verdicts: dict[str, dict] = {}
 
-    def _call_and_parse(model: str) -> tuple[str, dict]:
+    def _call_and_parse(model: str, eval_prompt: str) -> tuple[str, dict]:
         """Call a single model and parse JSON response."""
         print(f"[eval_dispatch] Calling {model}...", file=sys.stderr)
-        raw = call_model(model, prompt, timeout=args.timeout)
+        raw = call_model(model, eval_prompt, timeout=args.timeout)
         parsed = extract_json(raw)
         if parsed:
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
@@ -487,11 +541,35 @@ def main() -> int:
             "summary": "Response parsing failed",
         }
 
+    # --- Round 1 ---
+    print("[eval_dispatch] Round 1: initial evaluation", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
-        futures = {executor.submit(_call_and_parse, m): m for m in models}
+        futures = {executor.submit(_call_and_parse, m, prompt): m for m in models}
         for future in concurrent.futures.as_completed(futures):
             model_name, result = future.result()
             verdicts[model_name] = result
+
+    round1_verdicts = dict(verdicts)
+    evaluation_rounds = 1
+    round2_verdicts: dict[str, dict] | None = None
+
+    # --- Round 2 (only if verdicts conflict) ---
+    if check_verdict_conflict(verdicts):
+        evaluation_rounds = 2
+        print("[eval_dispatch] Round 1 verdicts conflict — starting Round 2 cross-verification", file=sys.stderr)
+        round2_prompt = build_round2_prompt(prompt, round1_verdicts)
+        round2_verdicts = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
+            futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
+            for future in concurrent.futures.as_completed(futures):
+                model_name, result = future.result()
+                round2_verdicts[model_name] = result
+
+        # Use round 2 verdicts for consensus
+        verdicts = round2_verdicts
+    else:
+        print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
 
     # Compute consensus
     consensus = compute_consensus(verdicts, min_valid_models=args.min_models)
@@ -507,7 +585,11 @@ def main() -> int:
         "issues": consensus.get("issues", []),
         "passed_criteria": consensus.get("passed_criteria", []),
         "failed_criteria": consensus.get("failed_criteria", []),
+        "evaluation_rounds": evaluation_rounds,
+        "round1_verdicts": {k: v.get("verdict") for k, v in round1_verdicts.items()},
     }
+    if round2_verdicts is not None:
+        result["round2_verdicts"] = {k: v.get("verdict") for k, v in round2_verdicts.items()}
     result["status_action"] = derive_status_action(result["verdict"], result["issues"])
 
     # Include reason if error
