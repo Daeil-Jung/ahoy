@@ -156,7 +156,8 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
       "category": "functional or test or quality or performance",
       "description": "specific issue description",
       "acceptance_criterion": "AC-001",
-      "suggested_fix": "suggested fix direction"
+      "suggested_fix": "suggested fix direction",
+      "suggestion": "concrete fix direction — which file, which section, and how to change it"
     }}
   ],
   "passed_criteria": ["AC-001"],
