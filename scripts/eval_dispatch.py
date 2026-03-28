@@ -89,15 +89,68 @@ def strip_generator_opinions(gen_report: str) -> str:
     return "\n".join(filtered_lines)
 
 
+def parse_acceptance_criteria(contract: str) -> list[dict[str, str]]:
+    """Parse acceptance criteria from contract.md.
+
+    Looks for a section headed '## Acceptance Criteria' or '### Acceptance Criteria',
+    then extracts list items starting with '- [ ]' or '- '.
+    Returns a list of dicts: [{"id": "AC-1", "description": "..."}, ...]
+    """
+    # Find the AC section (## or ###)
+    pattern = re.compile(
+        r"^#{2,3}\s+Acceptance\s+Criteria\s*$\n(?P<body>.*?)(?=^#{2,3}\s+|\Z)",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(contract)
+    if not match:
+        return []
+
+    criteria: list[dict[str, str]] = []
+    idx = 0
+    for line in match.group("body").splitlines():
+        stripped = line.strip()
+        # Match '- [ ] ...' or '- [x] ...' or '- ...' (but not sub-items or empty)
+        ac_match = re.match(r"^[-*]\s+(?:\[[ x]]\s+)?(.+)$", stripped, re.IGNORECASE)
+        if ac_match:
+            idx += 1
+            criteria.append({"id": f"AC-{idx}", "description": ac_match.group(1).strip()})
+
+    return criteria
+
+
 def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str:
     """Build the evaluation prompt."""
     # Filter Generator's self-assessment from gen_report
     sanitized_report = strip_generator_opinions(gen_report)
 
+    # Parse individual acceptance criteria for per-AC evaluation
+    criteria = parse_acceptance_criteria(contract)
+    criteria_section = ""
+    if criteria:
+        criteria_lines = [f"- **{c['id']}**: {c['description']}" for c in criteria]
+        criteria_section = (
+            "\n\n## Acceptance Criteria (evaluate each individually)\n"
+            + "\n".join(criteria_lines)
+        )
+
+    criteria_results_schema = ""
+    if criteria:
+        criteria_results_schema = """
+  "criteria_results": [
+    {{
+      "criterion_id": "AC-1",
+      "description": "criterion description",
+      "verdict": "pass or fail",
+      "evidence": "specific evidence from the code"
+    }}
+  ],
+  "convergence_ratio": 0.75,"""
+
     return f"""You are an independent code reviewer. Verify whether the Generator implemented the code correctly according to the sprint contract.
 
 ## Sprint Contract (this is the evaluation criteria)
 {contract}
+{criteria_section}
 
 ## Generator Report (only file lists and statistics for reference — all Generator opinions have been removed)
 {sanitized_report}
@@ -106,7 +159,7 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 {code_snippets}
 
 ## Review Instructions
-1. Strictly evaluate whether each acceptance criterion (AC) is satisfied
+1. Strictly evaluate whether each acceptance criterion (AC) is satisfied — judge each AC individually as pass or fail
 2. Identify issues from code quality, security, and performance perspectives
 3. Do not give lenient verdicts like "this is good enough"
 4. Do not trust claims in the Generator report — read and judge the code directly
@@ -114,7 +167,7 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 
 ```json
 {{
-  "verdict": "pass or partial_pass or fail",
+  "verdict": "pass or partial_pass or fail",{criteria_results_schema}
   "issues": [
     {{
       "id": "ISS-001",
@@ -336,6 +389,75 @@ def write_result(sprint_dir: Path, result: dict) -> None:
     print(f"[eval_dispatch] Result saved: {issues_path}", file=sys.stderr)
 
 
+def _merge_criteria_results(
+    valid_verdicts: dict[str, dict],
+) -> tuple[list[dict], float]:
+    """Merge per-criterion results across models and compute convergence_ratio.
+
+    A criterion is considered passed only if ALL valid models marked it as pass.
+    Returns (merged_criteria_results, convergence_ratio).
+    If no model provided criteria_results, returns ([], 0.0).
+    """
+    # Collect criteria_results from each model
+    per_model: dict[str, list[dict]] = {}
+    for model_name, result in valid_verdicts.items():
+        cr = result.get("criteria_results")
+        if cr and isinstance(cr, list):
+            per_model[model_name] = cr
+
+    if not per_model:
+        return [], 0.0
+
+    # Build a unified set of criterion IDs
+    all_criteria: dict[str, dict] = {}  # id -> merged result
+    for model_name, cr_list in per_model.items():
+        for cr in cr_list:
+            cid = cr.get("criterion_id", "")
+            if not cid:
+                continue
+            if cid not in all_criteria:
+                all_criteria[cid] = {
+                    "criterion_id": cid,
+                    "description": cr.get("description", ""),
+                    "verdict": "pass",
+                    "model_verdicts": {},
+                    "evidence": [],
+                }
+            # A criterion fails consensus if any model says fail
+            model_verdict = cr.get("verdict", "fail").lower()
+            all_criteria[cid]["model_verdicts"][model_name] = model_verdict
+            if model_verdict != "pass":
+                all_criteria[cid]["verdict"] = "fail"
+            evidence = cr.get("evidence", "")
+            if evidence:
+                all_criteria[cid]["evidence"].append(f"[{model_name}] {evidence}")
+
+    if not all_criteria:
+        return [], 0.0
+
+    # Build final list sorted by criterion ID (natural order: AC-1, AC-2, ..., AC-10)
+    def _ac_sort_key(cid: str) -> tuple[str, int]:
+        m = re.match(r"^(.*?)(\d+)$", cid)
+        return (m.group(1), int(m.group(2))) if m else (cid, 0)
+
+    merged: list[dict] = []
+    for cid in sorted(all_criteria.keys(), key=_ac_sort_key):
+        entry = all_criteria[cid]
+        merged.append({
+            "criterion_id": entry["criterion_id"],
+            "description": entry["description"],
+            "verdict": entry["verdict"],
+            "model_verdicts": entry["model_verdicts"],
+            "evidence": "; ".join(entry["evidence"]) if entry["evidence"] else "",
+        })
+
+    total = len(merged)
+    passed = sum(1 for c in merged if c["verdict"] == "pass")
+    ratio = round(passed / total, 4) if total > 0 else 0.0
+
+    return merged, ratio
+
+
 def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> dict:
     """Compute consensus from multiple model verdicts.
 
@@ -389,13 +511,22 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
     # If any model failed a criterion, remove it from passed
     all_passed -= all_failed
 
-    return {
+    # Merge per-criterion results across models
+    criteria_results, convergence_ratio = _merge_criteria_results(valid)
+
+    result = {
         "consensus_verdict": consensus,
         "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
         "issues": all_issues,
         "passed_criteria": sorted(all_passed),
         "failed_criteria": sorted(all_failed),
     }
+
+    if criteria_results:
+        result["criteria_results"] = criteria_results
+        result["convergence_ratio"] = convergence_ratio
+
+    return result
 
 
 def load_config() -> dict:
@@ -409,6 +540,51 @@ def load_config() -> dict:
             except (json.JSONDecodeError, OSError):
                 pass
     return {}
+
+
+def _record_convergence(
+    sprint_dir: Path, project_root: Path, convergence_ratio: float,
+) -> None:
+    """Append convergence_ratio to the current sprint's convergence_history in harness_state.json.
+
+    This enables tracking of convergence trends across rework attempts.
+    """
+    harness_path = project_root / ".claude" / "harness" / "harness_state.json"
+    if not harness_path.exists():
+        return
+
+    try:
+        state = json.loads(harness_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+
+    sprint_name = sprint_dir.name
+    sprints = state.get("sprints", [])
+
+    for sprint in sprints:
+        if sprint.get("sprint_id") == sprint_name:
+            history = sprint.setdefault("convergence_history", [])
+            attempt = sprint.get("attempt", len(history))
+            history.append({
+                "attempt": attempt,
+                "convergence_ratio": convergence_ratio,
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            break
+    else:
+        # Sprint not found — skip silently
+        return
+
+    try:
+        harness_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        print(
+            f"[eval_dispatch] Convergence {convergence_ratio} recorded for {sprint_name}",
+            file=sys.stderr,
+        )
+    except OSError as exc:
+        print(f"[eval_dispatch] Failed to update harness_state.json: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -508,6 +684,12 @@ def main() -> int:
         "passed_criteria": consensus.get("passed_criteria", []),
         "failed_criteria": consensus.get("failed_criteria", []),
     }
+
+    # Include per-criterion results and convergence ratio if available
+    if consensus.get("criteria_results"):
+        result["criteria_results"] = consensus["criteria_results"]
+        result["convergence_ratio"] = consensus["convergence_ratio"]
+
     result["status_action"] = derive_status_action(result["verdict"], result["issues"])
 
     # Include reason if error
@@ -516,6 +698,10 @@ def main() -> int:
 
     # Save issues.json
     write_result(sprint_dir, result)
+
+    # Record convergence in harness_state.json for trend tracking
+    if "convergence_ratio" in result:
+        _record_convergence(sprint_dir, project_root, result["convergence_ratio"])
 
     # Also output to stdout (so Claude can read it)
     print(json.dumps(result, ensure_ascii=False, indent=2))
