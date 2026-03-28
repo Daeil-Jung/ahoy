@@ -90,11 +90,18 @@ def strip_generator_opinions(gen_report: str) -> str:
 
 
 def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str:
-    """Build the evaluation prompt."""
+    """Build the evaluation prompt using G-Eval 4-step Chain-of-Thought structure.
+
+    Steps:
+        1. Code Understanding — analyse structure and behaviour of implemented code
+        2. AC Verification — verify each Acceptance Criterion from contract.md
+        3. Quality Assessment — code quality, security, performance, maintainability
+        4. Final Verdict — synthesise a verdict with reasoning chain
+    """
     # Filter Generator's self-assessment from gen_report
     sanitized_report = strip_generator_opinions(gen_report)
 
-    return f"""You are an independent code reviewer. Verify whether the Generator implemented the code correctly according to the sprint contract.
+    return f"""You are an independent code reviewer. Evaluate the Generator's implementation using a structured 4-step Chain-of-Thought process.
 
 ## Sprint Contract (this is the evaluation criteria)
 {contract}
@@ -105,17 +112,43 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 ## Implemented Code
 {code_snippets}
 
-## Review Instructions
-1. Strictly evaluate whether each acceptance criterion (AC) is satisfied
-2. Identify issues from code quality, security, and performance perspectives
-3. Do not give lenient verdicts like "this is good enough"
-4. Do not trust claims in the Generator report — read and judge the code directly
-5. For each issue, provide a concrete `suggestion` field describing the specific direction for fixing the issue — which file, which section, and how to change it
-6. Respond ONLY in the following JSON format (no text outside JSON):
+## Evaluation Process — follow these 4 steps IN ORDER
+
+### Step 1 — Code Understanding
+Analyse the structure and behaviour of the implemented code. Identify:
+- What files were created or modified and their purpose
+- Key functions, classes, and data flows
+- How the implementation addresses the sprint contract
+
+### Step 2 — AC Verification
+For EACH acceptance criterion (AC) in the contract:
+- Determine whether it is satisfied, partially satisfied, or not satisfied
+- Cite specific code evidence (file, function, line-level details)
+- Do not trust claims in the Generator report — read and judge the code directly
+
+### Step 3 — Quality Assessment
+Evaluate the code on these dimensions:
+- **Correctness**: Does the logic work as intended?
+- **Security**: Are there vulnerabilities or unsafe patterns?
+- **Performance**: Are there unnecessary inefficiencies?
+- **Maintainability**: Is the code readable, well-structured, and documented?
+
+### Step 4 — Final Verdict
+Synthesise findings from Steps 1-3 into a final verdict. Do not give lenient verdicts like "this is good enough".
+
+## Response Format
+Respond ONLY in the following JSON format (no text outside JSON).
+The `reasoning_chain` field is REQUIRED — you must fill every sub-field before deciding the verdict.
 
 ```json
 {{
   "verdict": "pass or partial_pass or fail",
+  "reasoning_chain": {{
+    "code_understanding": "Step 1 summary: structure and behaviour analysis",
+    "ac_verification": "Step 2 summary: per-AC pass/fail with code evidence",
+    "quality_assessment": "Step 3 summary: correctness, security, performance, maintainability",
+    "final_reasoning": "Step 4 summary: why the verdict was chosen based on the above"
+  }},
   "issues": [
     {{
       "id": "ISS-001",
@@ -351,11 +384,20 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
     valid = {k: v for k, v in verdicts.items() if v.get("verdict") != "error"}
     error_models = [k for k, v in verdicts.items() if v.get("verdict") == "error"]
 
+    def _build_model_details(src: dict[str, dict]) -> dict[str, dict]:
+        details: dict[str, dict] = {}
+        for k, v in src.items():
+            d: dict = {"verdict": v.get("verdict")}
+            if v.get("reasoning_chain"):
+                d["reasoning_chain"] = v["reasoning_chain"]
+            details[k] = d
+        return details
+
     if not valid:
         return {
             "consensus_verdict": "error",
             "reason": "All external model calls failed",
-            "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+            "model_verdicts": _build_model_details(verdicts),
         }
 
     if len(valid) < min_valid_models:
@@ -363,7 +405,7 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
             "consensus_verdict": "error",
             "reason": f"Valid models {len(valid)} < minimum {min_valid_models} required. "
                       f"Failed models: {', '.join(error_models)}",
-            "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+            "model_verdicts": _build_model_details(verdicts),
         }
 
     verdict_values = [v["verdict"] for v in valid.values()]
@@ -393,11 +435,34 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
 
     return {
         "consensus_verdict": consensus,
-        "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+        "model_verdicts": _build_model_details(verdicts),
         "issues": all_issues,
         "passed_criteria": sorted(all_passed),
         "failed_criteria": sorted(all_failed),
     }
+
+
+_REASONING_CHAIN_KEYS = ("code_understanding", "ac_verification", "quality_assessment", "final_reasoning")
+
+
+def _warn_if_missing_reasoning_chain(model: str, parsed: dict) -> None:
+    """Log a warning if reasoning_chain is absent or incomplete.
+
+    This is a soft check for backward-compatibility — it does NOT set verdict to error.
+    """
+    chain = parsed.get("reasoning_chain")
+    if chain is None:
+        print(f"[eval_dispatch] WARNING: {model} response missing reasoning_chain", file=sys.stderr)
+        return
+    if not isinstance(chain, dict):
+        print(f"[eval_dispatch] WARNING: {model} reasoning_chain is not a dict", file=sys.stderr)
+        return
+    missing = [k for k in _REASONING_CHAIN_KEYS if not chain.get(k)]
+    if missing:
+        print(
+            f"[eval_dispatch] WARNING: {model} reasoning_chain incomplete, missing: {', '.join(missing)}",
+            file=sys.stderr,
+        )
 
 
 def load_config() -> dict:
@@ -477,6 +542,7 @@ def main() -> int:
         parsed = extract_json(raw)
         if parsed:
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
+            _warn_if_missing_reasoning_chain(model, parsed)
             return model, parsed
         print(f"[eval_dispatch] {model} raw output (first 500): {raw[:500]}", file=sys.stderr)
         print(f"[eval_dispatch] {model} parsing failed", file=sys.stderr)
@@ -511,6 +577,15 @@ def main() -> int:
         "failed_criteria": consensus.get("failed_criteria", []),
     }
     result["status_action"] = derive_status_action(result["verdict"], result["issues"])
+
+    # Aggregate reasoning_chain from consensus model_verdicts (already computed)
+    reasoning_chains = {
+        name: detail["reasoning_chain"]
+        for name, detail in consensus.get("model_verdicts", {}).items()
+        if detail.get("reasoning_chain")
+    }
+    if reasoning_chains:
+        result["reasoning_chain"] = reasoning_chains
 
     # Include reason if error
     if consensus.get("reason"):
