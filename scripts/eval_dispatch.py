@@ -151,17 +151,20 @@ def call_model(model: str, prompt: str, timeout: int = 600) -> str:
     try:
 
         if model == "codex":
-            # codex exec: --yolo (auto-approve), --ephemeral (no session saved)
-            # --output-file: save final response to file, - : read prompt from stdin
-            output_file = str(Path.cwd() / f".ahoy-codex-output-{os.getpid()}.json")
+            # codex exec: --dangerously-bypass-approvals-and-sandbox (auto-approve),
+            # --ephemeral (no session saved), -o/--output-last-message: save final response to file
+            # - : read prompt from stdin
+            output_file = str(Path.cwd() / f".ahoy-codex-output-{os.getpid()}.txt")
             cmd = [
-                "codex", "exec", "--yolo", "--ephemeral",
-                "--output-file", output_file, "-",
+                "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--ephemeral",
+                "--output-last-message", output_file, "-",
             ]
             stdin_data = prompt
         elif model == "gemini":
-            # gemini: -p (non-interactive headless mode), pipe prompt via stdin
-            cmd = ["gemini", "-p"]
+            # gemini: -p/--prompt (non-interactive headless mode)
+            # Use a short -p flag with stdin carrying the actual prompt content
+            # (gemini docs: "Appended to input on stdin if any")
+            cmd = ["gemini", "--prompt", "Evaluate the code as instructed below via stdin."]
             stdin_data = prompt
         elif model == "claude":
             # claude: -p (non-interactive), pipe prompt via stdin
