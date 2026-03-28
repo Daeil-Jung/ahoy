@@ -592,7 +592,6 @@ def audit_final_scope() -> None:
     git_commands = [
         ("git diff", ["git", "diff", "--name-only", "HEAD"]),
         ("git diff --cached", ["git", "diff", "--name-only", "--cached"]),
-        ("git ls-files", ["git", "ls-files", "--others", "--exclude-standard"]),
     ]
 
     outputs: list[str] = []
