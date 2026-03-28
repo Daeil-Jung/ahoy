@@ -575,7 +575,9 @@ _PLACEHOLDER_PATTERN = re.compile(
 
 def _is_test_file(file_path: str) -> bool:
     """Return True if *file_path* (forward-slash normalized) looks like a test file."""
-    return any(pat in file_path for pat in _TEST_FILE_PATTERNS)
+    # Ensure a leading slash so directory patterns like "/tests/" match relative paths
+    normalized = "/" + file_path.lstrip("/")
+    return any(pat in normalized for pat in _TEST_FILE_PATTERNS)
 
 
 def _load_allowlist() -> set[str]:
@@ -629,13 +631,10 @@ def check_post_edit_quality() -> None:
     if ext and ext not in text_extensions:
         return
 
-    target = Path(file_path)
-    if not target.exists():
-        return
-
-    try:
-        content = target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    # Scan only the content being written — not the entire file on disk.
+    # For Edit tool: inspect new_string; for Write tool: inspect content.
+    content = tool_input.get("new_string") or tool_input.get("content") or ""
+    if not content:
         return
 
     allowlist = _load_allowlist()
