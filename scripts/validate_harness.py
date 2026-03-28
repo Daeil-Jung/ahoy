@@ -562,17 +562,20 @@ def audit_final_scope() -> None:
     """
     state = load_state()
     current_sprint = get_current_sprint(state)
+    current_status = get_current_status(state)
 
     if not current_sprint:
         return  # No active sprint
+    if current_status != "generated":
+        return  # Only audit on transitions from generated state
 
     contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
     if not contract_path.exists():
         return  # No contract yet
 
-    create, modify, _preserve = parse_scope_from_contract(contract_path)
+    create, modify, preserve = parse_scope_from_contract(contract_path)
     allowed = create + modify
-    if not allowed:
+    if not allowed and not preserve:
         return  # No scope defined, pass through
 
     # Collect changed files via git diff against HEAD
@@ -600,13 +603,29 @@ def audit_final_scope() -> None:
                 changed_files.add(stripped.replace("\\", "/"))
 
     # Filter out harness-internal files — always allowed
-    out_of_scope: list[str] = []
-    for f in sorted(changed_files):
-        if f.startswith(".claude/harness/"):
-            continue
+    user_changed = [f for f in sorted(changed_files) if not f.startswith(".claude/harness/")]
 
-        if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed):
-            out_of_scope.append(f)
+    # Check preserved files for unauthorized modifications
+    preserved_violations = [
+        f for f in user_changed
+        if any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in preserve)
+    ]
+
+    if preserved_violations:
+        fail(
+            "[HARNESS-GUARD] Blocked: Files to Preserve were modified:\n"
+            + "\n".join(f"  - {f}" for f in preserved_violations)
+            + "\n[HARNESS-GUARD] These files are protected by the sprint contract and must not be modified.\n"
+            "[HARNESS-GUARD] Revert changes to preserved files before transitioning."
+        )
+
+    # Check for files outside the allowed scope (create + modify)
+    out_of_scope: list[str] = []
+    if allowed:
+        out_of_scope = [
+            f for f in user_changed
+            if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed)
+        ]
 
     if out_of_scope:
         fail(
