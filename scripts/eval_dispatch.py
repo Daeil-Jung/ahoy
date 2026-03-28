@@ -399,16 +399,111 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
 
 
 def load_config() -> dict:
-    """Load ahoy_config.json from plugin root if available."""
+    """Load ahoy_config.json from plugin root if available.
+
+    Applies defaults for cost_limit when not specified (None = unlimited).
+    """
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    config: dict = {}
     if plugin_root:
         config_path = Path(plugin_root) / "ahoy_config.json"
         if config_path.exists():
             try:
-                return json.loads(config_path.read_text(encoding="utf-8"))
+                config = json.loads(config_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
-    return {}
+
+    # Apply cost_limit defaults — None means unlimited
+    config.setdefault("cost_limit", None)
+    return config
+
+
+def parse_usage(response: str, parsed: dict | None = None) -> dict:
+    """Extract usage/token information from a model response.
+
+    *parsed* may be supplied when the caller has already extracted JSON from
+    *response* (avoids re-parsing).  Falls back to estimating token counts
+    from the response length when no explicit usage data is present.
+    """
+    if parsed is None:
+        parsed = extract_json(response)
+    if parsed and "usage" in parsed:
+        usage = parsed["usage"]
+        return {
+            "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+            "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
+        }
+
+    # Fallback: rough estimate based on character length (≈4 chars per token)
+    char_count = len(response)
+    estimated_output = max(char_count // 4, 0)
+    return {"input_tokens": 0, "output_tokens": estimated_output}
+
+
+def update_cost_tracking(
+    harness_state_path: Path,
+    eval_calls: int,
+    tokens: int,
+    sprint_id: str = "",
+    attempt: int = 0,
+) -> None:
+    """Append cost data to the ``cost_tracking`` field in harness_state.json."""
+    state: dict = {}
+    try:
+        state = json.loads(harness_state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        pass
+
+    tracking = state.setdefault("cost_tracking", {
+        "total_eval_calls": 0,
+        "total_tokens": 0,
+        "history": [],
+    })
+
+    tracking["total_eval_calls"] = tracking.get("total_eval_calls", 0) + eval_calls
+    tracking["total_tokens"] = tracking.get("total_tokens", 0) + tokens
+    tracking.setdefault("history", []).append({
+        "sprint_id": sprint_id,
+        "attempt": attempt,
+        "eval_calls": eval_calls,
+        "tokens": tokens,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    harness_state_path.parent.mkdir(parents=True, exist_ok=True)
+    harness_state_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def check_cost_limit(harness_state_path: Path, config: dict) -> bool:
+    """Return True if accumulated costs exceed the configured limit (abort).
+
+    Returns False (no abort) when ``cost_limit`` is ``None`` or absent.
+    """
+    cost_limit = config.get("cost_limit")
+    if not cost_limit:
+        return False
+
+    try:
+        state = json.loads(harness_state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return False
+
+    tracking = state.get("cost_tracking", {})
+    total_calls = tracking.get("total_eval_calls", 0)
+    total_tokens = tracking.get("total_tokens", 0)
+
+    max_calls = cost_limit.get("max_eval_calls")
+    max_tokens = cost_limit.get("max_tokens")
+
+    if max_calls is not None and total_calls >= max_calls:
+        return True
+    if max_tokens is not None and total_tokens >= max_tokens:
+        return True
+
+    return False
 
 
 def main() -> int:
@@ -427,6 +522,21 @@ def main() -> int:
     sprint_dir = Path(args.sprint_dir)
     project_root = Path(args.project_root)
     models = [m.strip() for m in args.models.split(",")]
+
+    # Resolve harness_state.json path for cost tracking
+    harness_state_path = project_root / ".claude" / "harness" / "harness_state.json"
+
+    # Check cost limit before proceeding
+    if check_cost_limit(harness_state_path, config):
+        cost_limit = config.get("cost_limit", {})
+        print(
+            f"ABORT: Cost limit exceeded. "
+            f"max_eval_calls={cost_limit.get('max_eval_calls')}, "
+            f"max_tokens={cost_limit.get('max_tokens')}. "
+            f"Review cost_tracking in harness_state.json or increase limits in ahoy_config.json.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Read inputs
     contract_path = sprint_dir / "contract.md"
@@ -468,14 +578,16 @@ def main() -> int:
     print(f"[eval_dispatch] Evaluation models: {models} (parallel calls)", file=sys.stderr)
     verdicts: dict[str, dict] = {}
 
-    def _call_and_parse(model: str) -> tuple[str, dict]:
-        """Call a single model and parse JSON response."""
+    raw_responses: dict[str, str] = {}
+
+    def _call_and_parse(model: str) -> tuple[str, dict, str]:
+        """Call a single model and parse JSON response.  Returns (model, parsed, raw)."""
         print(f"[eval_dispatch] Calling {model}...", file=sys.stderr)
         raw = call_model(model, prompt, timeout=args.timeout)
         parsed = extract_json(raw)
         if parsed:
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
-            return model, parsed
+            return model, parsed, raw
         print(f"[eval_dispatch] {model} raw output (first 500): {raw[:500]}", file=sys.stderr)
         print(f"[eval_dispatch] {model} parsing failed", file=sys.stderr)
         return model, {
@@ -485,13 +597,31 @@ def main() -> int:
             "passed_criteria": [],
             "failed_criteria": [],
             "summary": "Response parsing failed",
-        }
+        }, raw
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {executor.submit(_call_and_parse, m): m for m in models}
         for future in concurrent.futures.as_completed(futures):
-            model_name, result = future.result()
+            model_name, result, raw = future.result()
             verdicts[model_name] = result
+            raw_responses[model_name] = raw
+
+    # --- Cost tracking: parse usage from each model response and update state ---
+    total_tokens_this_run = 0
+    for model_name, raw in raw_responses.items():
+        usage = parse_usage(raw, parsed=verdicts.get(model_name))
+        total_tokens_this_run += usage["input_tokens"] + usage["output_tokens"]
+    # Also account for prompt tokens sent to each model (estimate)
+    prompt_tokens_estimate = len(prompt) // 4
+    total_tokens_this_run += prompt_tokens_estimate * len(models)
+
+    update_cost_tracking(
+        harness_state_path,
+        eval_calls=len(models),
+        tokens=total_tokens_this_run,
+        sprint_id=sprint_dir.name,
+        attempt=0,
+    )
 
     # Compute consensus
     consensus = compute_consensus(verdicts, min_valid_models=args.min_models)
