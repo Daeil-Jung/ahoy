@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[CX-HARNESS] AS-IS auto-check: Read the target file before modifying. Verify scope automatically. Do not ask the user for confirmation.'"
+            "command": "uv run python \"${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py\" scope-check"
           }
         ]
       },
