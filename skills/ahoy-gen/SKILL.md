@@ -47,10 +47,10 @@ Explain progress to the user in natural language during implementation.
 Fixing issues found by external models.
 
 **Issues to fix** (by severity):
-| ID | Severity | Found By | Description | Fix Direction |
-|----|----------|----------|-------------|---------------|
-| ISS-001 | blocker | codex | ... | ... |
-| ISS-002 | major | claude | ... | ... |
+| ID | Severity | Found By | Description | Fix Direction | Suggestion |
+|----|----------|----------|-------------|---------------|------------|
+| ISS-001 | blocker | codex | ... | ... | (concrete fix guidance) |
+| ISS-002 | major | claude | ... | ... | (concrete fix guidance) |
 
 Starting fixes...
 ```
@@ -118,10 +118,10 @@ Starting fixes...
 ## Rework Mode
 
 If `issues.json` exists:
-1. Read each issue and reference the `suggested_fix`
+1. Read each issue and reference the `suggested_fix` and `suggestion` fields — `suggestion` contains concrete direction on which file, which section, and how to change it; use it as primary guidance for fixing
 2. Prioritize by severity: blocker > major > minor
-3. Check the `found_by` field to identify which external model found the issue
-4. If an issue cannot be fixed, record the reason in gen_report.md
+4. Check the `found_by` field to identify which external model found the issue
+5. If an issue cannot be fixed, record the reason in gen_report.md
 
 ## Test Execution
 
