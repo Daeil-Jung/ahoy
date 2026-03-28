@@ -6,7 +6,7 @@ model: opus
 effort: max
 ---
 
-# AHOY — Adversarial Harness for Objective Yielding
+# AHOY — Agent Harness for Orchestrated Yielding
 
 Run the full lifecycle of the AI coding harness with a single input.
 Automatically orchestrates the Planner → Generator → Evaluator (external model) loop.

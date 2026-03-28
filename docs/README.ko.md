@@ -4,7 +4,7 @@
 
 # AHOY
 
-### Adversarial Harness for Objective Yielding
+### Agent Harness for Orchestrated Yielding
 
 **AI 코딩 에이전트가 생성한 코드를, AI 코딩 에이전트가 아닌 외부 모델이 평가한다.**
 

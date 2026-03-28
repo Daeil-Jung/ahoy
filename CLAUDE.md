@@ -1,4 +1,4 @@
-# AHOY — Adversarial Harness for Objective Yielding
+# AHOY — Agent Harness for Orchestrated Yielding
 
 Claude Code **plugin** — Generator-Evaluator separation with external model consensus.
 

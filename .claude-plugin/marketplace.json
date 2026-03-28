@@ -1,6 +1,6 @@
 {
   "name": "ahoy-marketplace",
-  "description": "Marketplace for AHOY — Adversarial Harness for Objective Yielding",
+  "description": "Marketplace for AHOY — Agent Harness for Orchestrated Yielding",
   "plugins": [
     {
       "name": "ahoy",
