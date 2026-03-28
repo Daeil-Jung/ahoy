@@ -12,14 +12,6 @@ Claude Code **plugin** — Generator-Evaluator separation with external model co
 | `/ahoy:ahoy-gen` | Generator — implements code per contract (Claude) |
 | `/ahoy:ahoy-eval` | Evaluator — external model (Codex/Gemini) evaluation dispatch |
 
-## Versioning
-
-Format: **`YY.MM.DD.Patch`** (e.g., `26.03.28.0`)
-
-- `YY.MM.DD` — release date (2-digit year, zero-padded month/day)
-- `Patch` — same-day incremental release count, starts at `0`
-- Version is tracked in `.claude-plugin/plugin.json`
-
 ## Core Rules
 
 1. **Claude never evaluates** — external models judge Generator output
