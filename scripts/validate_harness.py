@@ -14,7 +14,10 @@ Usage: validate_harness.py <check_type>
     guard-eval-files — Block direct writing of issues.json (only eval_dispatch.py allowed)
     pre-commit       — Run tests, lint, and type check before commit (only in harness mode)
     pre-push         — Run tests, lint, type check + verify state consistency before push
+    circuit-breaker  — Detect repeated failure patterns across rework attempts
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -217,6 +220,141 @@ def fail(msg: str) -> None:
 
 def info(msg: str) -> None:
     print(msg)
+
+
+# ── Failure pattern detection (circuit breaker) ────────────────
+
+
+_FAILURE_PATTERNS: dict[str, list[str]] = {
+    "scope_violation": ["scope", "out of scope", "outside", "not in contract"],
+    "test_failure": ["test", "assert", "expect", "fail"],
+    "stub_remaining": ["stub", "todo", "not implemented", "placeholder", "fixme"],
+    "type_error": ["type", "typeerror", "typing", "annotation", "incompatible"],
+    "logic_error": ["logic", "incorrect", "wrong", "bug", "regression"],
+}
+
+
+def classify_failure_type(issues: list[dict]) -> list[str]:
+    """Classify each issue into a failure pattern category.
+
+    Inspects the ``category`` and ``description`` fields of each issue dict
+    and returns a list of matched pattern labels.
+    """
+    matched: list[str] = []
+    for issue in issues:
+        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
+        for label, keywords in _FAILURE_PATTERNS.items():
+            if any(kw in text for kw in keywords):
+                matched.append(label)
+                break
+        else:
+            matched.append("other")
+    return matched
+
+
+def _issues_signature(issues: list[dict]) -> set[str]:
+    """Build a set of comparable signatures from issue dicts.
+
+    Uses ``(category, description)`` as the identity key so that two
+    issues with the same category and description are considered identical.
+    """
+    return {
+        f"{issue.get('category', '').strip().lower()}::{issue.get('description', '').strip().lower()}"
+        for issue in issues
+    }
+
+
+def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
+    """Load issues from a specific attempt backup file.
+
+    The convention is ``issues.json.attempt-N`` for archived attempts, while
+    ``issues.json`` always holds the *current* attempt.
+    """
+    backup = sprint_dir / f"issues.json.attempt-{attempt}"
+    if backup.exists():
+        data = load_json(backup)
+        if data and isinstance(data.get("issues"), list):
+            return data["issues"]
+    return []
+
+
+def detect_failure_pattern(sprint_dir: Path, current_attempt: int) -> dict:
+    """Compare current and previous attempt issues for repeated failures.
+
+    Returns a dict with at least ``circuit_break`` (bool).  When True, the
+    dict also contains ``repeated_issues`` and ``recommendation``.
+    """
+    if current_attempt < 2:
+        return {"circuit_break": False}
+
+    # Load current issues
+    current_file = sprint_dir / "issues.json"
+    current_data = load_json(current_file)
+    if not current_data or not isinstance(current_data.get("issues"), list):
+        return {"circuit_break": False}
+    current_issues: list[dict] = current_data["issues"]
+
+    # Load previous attempt issues
+    prev_issues = _load_attempt_issues(sprint_dir, current_attempt - 1)
+    if not prev_issues:
+        return {"circuit_break": False}
+
+    current_sigs = _issues_signature(current_issues)
+    prev_sigs = _issues_signature(prev_issues)
+
+    repeated = current_sigs & prev_sigs
+    if not repeated:
+        return {"circuit_break": False}
+
+    # Build human-readable repeated issue list
+    repeated_descriptions = [sig.split("::", 1)[-1] for sig in repeated]
+    failure_types = classify_failure_type(current_issues)
+
+    return {
+        "circuit_break": True,
+        "repeated_issues": sorted(repeated_descriptions),
+        "failure_types": sorted(set(failure_types)),
+        "recommendation": "failed",
+    }
+
+
+def check_circuit_breaker() -> None:
+    """Detect repeated failure patterns across rework attempts.
+
+    This check runs after evaluation.  If the same issues appear in two
+    consecutive attempts it emits a warning (info-level, not a hard block)
+    and records the pattern in ``harness_state.json``.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    if not current_sprint:
+        return
+
+    idx = state.get("current_sprint_index", 0)
+    sprint_obj = state["sprints"][idx]
+    current_attempt = sprint_obj.get("attempt", 0)
+
+    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+    pattern = detect_failure_pattern(sprint_dir, current_attempt)
+
+    sprint_obj["failure_pattern"] = pattern
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+    if pattern.get("circuit_break"):
+        repeated = pattern.get("repeated_issues", [])
+        ftypes = pattern.get("failure_types", [])
+        info(
+            "[HARNESS-GUARD] WARNING: Circuit breaker triggered — repeated failure pattern detected\n"
+            f"[HARNESS-GUARD]   Repeated issues: {', '.join(repeated)}\n"
+            f"[HARNESS-GUARD]   Failure types: {', '.join(ftypes)}\n"
+            "[HARNESS-GUARD]   Recommendation: mark sprint as 'failed' instead of continuing rework.\n"
+            "[HARNESS-GUARD]   The same issues have appeared in consecutive attempts — further rework is unlikely to help."
+        )
+    else:
+        info("[HARNESS-GUARD] Passed: No repeated failure pattern detected")
 
 
 # ── Check handlers ──────────────────────────────────────────────
@@ -553,6 +691,7 @@ CHECKS = {
     "guard-eval-files": check_guard_eval_files,
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
+    "circuit-breaker": check_circuit_breaker,
 }
 
 
