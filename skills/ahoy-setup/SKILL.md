@@ -92,24 +92,97 @@ Present results as a diagnostic table:
 **Result**: Ready (2/3 external models available)
 ```
 
-## After Checks
+## After Checks — Auto-Install Phase
+
+After diagnostics, **automatically fix** every issue that can be resolved non-interactively.
+Ask the user for confirmation once before starting the batch install, then proceed without further prompts.
+
+### Auto-install flow
+
+1. **Summarize** what will be installed (e.g., "uv, Codex CLI, Gemini CLI를 설치합니다")
+2. **AskUserQuestion**: "자동 설치를 진행할까요?" — Yes / No
+3. If Yes, run the install commands below **sequentially** (each depends on the previous succeeding):
+
+#### uv (if missing)
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env  # or equivalent for the shell
+```
+
+#### Codex CLI (if missing)
+
+```bash
+npm install -g @openai/codex
+```
+
+#### Gemini CLI (if missing)
+
+```bash
+npm install -g @google/gemini-cli
+```
+
+#### CLAUDE_PLUGIN_ROOT (if not set)
+
+Detect the plugin's actual install path and append the export to the user's shell profile:
+
+```bash
+# Find the plugin root (where this SKILL.md lives)
+PLUGIN_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/../.." && pwd)"
+echo "export CLAUDE_PLUGIN_ROOT=\"${PLUGIN_ROOT}\"" >> ~/.bashrc
+source ~/.bashrc
+```
+
+If `CLAUDE_PLUGIN_ROOT` is already set, skip this step.
+
+### Post-install authentication
+
+After installation, **authentication requires user interaction**. Run the auth commands directly so the user can complete them in-session:
+
+1. **Codex** (if just installed): Tell the user to run `! codex login` to authenticate interactively
+2. **Gemini** (if just installed): Tell the user to run `! gemini auth` to authenticate interactively
+
+Explain that the `!` prefix runs the command in the current session so the interactive prompts work.
+
+### Model Selection — Evaluation Config
+
+After install & auth are complete, **ask the user which models to use for evaluation**.
+
+1. Present the list of **installed and authenticated** external model CLIs (e.g., codex, gemini, claude)
+2. **AskUserQuestion**: "평가에 사용할 외부 모델을 선택하세요 (최소 2개)" with options like:
+   - "codex, gemini"
+   - "codex, claude"
+   - "gemini, claude"
+   - "codex, gemini, claude (all)"
+   - Only show combinations where the CLIs are actually installed
+3. Save the selection to `ahoy_config.json` in the plugin root:
+
+```bash
+cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
+{
+  "eval_models": ["codex", "gemini"],
+  "min_models": 2
+}
+CONF
+```
+
+The `eval_models` array determines which models `eval_dispatch.py` calls. The `min_models` value sets the consensus threshold.
+
+If `ahoy_config.json` already exists, read it and show the current config. Ask if the user wants to change it.
+
+### Final re-check
+
+After all installs, auth, and model selection complete, **re-run all diagnostic checks automatically** and present the updated table. Do not ask the user to run `/ahoy:ahoy-setup` again.
 
 ### If all checks pass
-Tell the user they're ready and show how to start:
+
+Tell the user they're ready:
 ```
 Ready to go! Start with:  /ahoy <project request>
+
+Evaluation models: codex, gemini (from ahoy_config.json)
 ```
 
-### If issues are found
-Group issues by severity and provide fix commands:
+### If blockers remain
 
-**Blockers** (cannot run AHOY):
-- Missing Python → install instructions per OS
-- Missing uv → `pip install uv` or installer URL
-- Fewer than 2 external model CLIs → installation links
-
-**Warnings** (can run but limited):
-- Only 2 of 3 external models → suggest installing the third
-- Old Python version (3.10-3.11) → works but 3.12+ recommended
-
-Provide copy-pasteable fix commands for each issue. After the user fixes issues, suggest running `/ahoy:ahoy-setup` again to re-verify.
+List only the remaining issues with manual fix instructions. These should only be things that truly cannot be automated (e.g., Python not installed on a system without a package manager, npm not available).

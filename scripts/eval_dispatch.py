@@ -395,13 +395,30 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
     }
 
 
+def load_config() -> dict:
+    """Load ahoy_config.json from plugin root if available."""
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    if plugin_root:
+        config_path = Path(plugin_root) / "ahoy_config.json"
+        if config_path.exists():
+            try:
+                return json.loads(config_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+    return {}
+
+
 def main() -> int:
+    config = load_config()
+    default_models = ",".join(config.get("eval_models", ["codex", "claude"]))
+    default_min = config.get("min_models", 2)
+
     parser = argparse.ArgumentParser(description="External model code evaluation dispatcher")
     parser.add_argument("sprint_dir", help="Sprint directory path (.claude/harness/sprints/sprint-NNN)")
-    parser.add_argument("--models", default="codex,claude", help="Models to use (comma-separated: codex,claude,gemini)")
+    parser.add_argument("--models", default=default_models, help="Models to use (comma-separated: codex,claude,gemini)")
     parser.add_argument("--project-root", default=".", help="Project root path")
     parser.add_argument("--timeout", type=int, default=600, help="Model call timeout (seconds)")
-    parser.add_argument("--min-models", type=int, default=2, help="Minimum valid model count (default 2)")
+    parser.add_argument("--min-models", type=int, default=default_min, help="Minimum valid model count (default 2)")
     args = parser.parse_args()
 
     sprint_dir = Path(args.sprint_dir)

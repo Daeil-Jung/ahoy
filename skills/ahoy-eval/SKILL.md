@@ -52,14 +52,21 @@ After execution:
 
 ### 2. External Model Evaluation Dispatch
 
-**Run eval_dispatch.py via Bash** to delegate evaluation to external models:
+**Read the evaluation config**, then run eval_dispatch.py:
 
 ```bash
+# Read configured models from ahoy_config.json
+EVAL_MODELS=$(python3 -c "import json; c=json.load(open('${CLAUDE_PLUGIN_ROOT}/ahoy_config.json')); print(','.join(c['eval_models']))" 2>/dev/null || echo "codex,claude")
+MIN_MODELS=$(python3 -c "import json; c=json.load(open('${CLAUDE_PLUGIN_ROOT}/ahoy_config.json')); print(c.get('min_models',2))" 2>/dev/null || echo "2")
+
 python ${CLAUDE_PLUGIN_ROOT}/scripts/eval_dispatch.py \
   .claude/harness/sprints/sprint-NNN \
-  --models codex,claude \
+  --models "${EVAL_MODELS}" \
+  --min-models "${MIN_MODELS}" \
   --project-root .
 ```
+
+If `ahoy_config.json` does not exist, fall back to `--models codex,claude`.
 
 Output to the user before execution:
 ```
@@ -68,7 +75,7 @@ Output to the user before execution:
 External models review the code in a process completely separated from the Generator (Claude).
 The results of this evaluation cannot be changed by Claude — the external process writes directly to issues.json.
 
-**Models to call**: codex, claude (separate processes)
+**Models to call**: (models from ahoy_config.json, e.g. codex, gemini)
 **Evaluation input**:
   - contract.md (acceptance criteria)
   - gen_report.md (implementation report)
@@ -80,17 +87,16 @@ Running eval_dispatch.py...
 ```
 
 This script:
+- Reads model list from `ahoy_config.json` (or `--models` fallback)
 - Collects contract.md + gen_report.md + actual code
-- Calls Codex CLI and Claude CLI (separate process) respectively
-- Calculates consensus of both verdicts
+- Calls each configured external model CLI in parallel
+- Calculates consensus of all verdicts
 - Saves results to `.claude/harness/sprints/sprint-NNN/issues.json`
 
-**Available model options**:
+**Available model options** (configured via `/ahoy:ahoy-setup`):
 - `codex` — OpenAI Codex CLI
 - `gemini` — Google Gemini CLI
 - `claude` — Anthropic Claude CLI (context separated since it's a separate process)
-
-Adjust the `--models` argument to match the installed CLIs.
 
 ### 3. Read Results and Record
 
