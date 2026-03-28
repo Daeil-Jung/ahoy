@@ -131,7 +131,14 @@ def parse_acceptance_criteria(contract: str) -> list[dict[str, str]]:
 
 
 def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str:
-    """Build the evaluation prompt."""
+    """Build the evaluation prompt using G-Eval 4-step Chain-of-Thought structure.
+
+    Steps:
+        1. Code Understanding — analyse structure and behaviour of implemented code
+        2. AC Verification — verify each Acceptance Criterion from contract.md
+        3. Quality Assessment — code quality, security, performance, maintainability
+        4. Final Verdict — synthesise a verdict with reasoning chain
+    """
     # Filter Generator's self-assessment from gen_report
     sanitized_report = strip_generator_opinions(gen_report)
 
@@ -158,7 +165,7 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
   ],
   "convergence_ratio": 0.75,"""
 
-    return f"""You are an independent code reviewer. Verify whether the Generator implemented the code correctly according to the sprint contract.
+    return f"""You are an independent code reviewer. Evaluate the Generator's implementation using a structured 4-step Chain-of-Thought process.
 
 ## Sprint Contract (this is the evaluation criteria)
 {contract}
@@ -175,11 +182,58 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 2. Identify issues from code quality, security, and performance perspectives
 3. Do not give lenient verdicts like "this is good enough"
 4. Do not trust claims in the Generator report — read and judge the code directly
+
+## Forced Objection
+- List at least one concern or improvement, even if minor.
+- Even if the implementation looks correct, you MUST provide at least one concrete suggestion for improvement (e.g., edge cases, naming, documentation, test coverage, error handling).
+- If you cannot find any issue, suggest a minor improvement anyway — no review is complete without at least one actionable objection.
+
+## Active Rejection
+- Do NOT default to PASS — justify your verdict with specific evidence.
+- A "pass" verdict requires explicit justification for why each acceptance criterion is met.
+- If in doubt, lean toward "partial_pass" or "fail" rather than "pass".
+
 5. Respond ONLY in the following JSON format (no text outside JSON):
+## Evaluation Process — follow these 4 steps IN ORDER
+
+### Step 1 — Code Understanding
+Analyse the structure and behaviour of the implemented code. Identify:
+- What files were created or modified and their purpose
+- Key functions, classes, and data flows
+- How the implementation addresses the sprint contract
+
+### Step 2 — AC Verification
+For EACH acceptance criterion (AC) in the contract:
+- Determine whether it is satisfied, partially satisfied, or not satisfied
+- Cite specific code evidence (file, function, line-level details)
+- Do not trust claims in the Generator report — read and judge the code directly
+
+### Step 3 — Quality Assessment
+Evaluate the code on these dimensions:
+- **Correctness**: Does the logic work as intended?
+- **Security**: Are there vulnerabilities or unsafe patterns?
+- **Performance**: Are there unnecessary inefficiencies?
+- **Maintainability**: Is the code readable, well-structured, and documented?
+
+### Step 4 — Final Verdict
+Synthesise findings from Steps 1-3 into a final verdict. Do not give lenient verdicts like "this is good enough".
+
+## Response Format
+Respond ONLY in the following JSON format (no text outside JSON).
+The `reasoning_chain` field is REQUIRED — you must fill every sub-field before deciding the verdict.
 
 ```json
 {{
   "verdict": "pass or partial_pass or fail",{criteria_results_schema}
+  "objections": [
+    "at least one concrete concern or improvement suggestion (REQUIRED, minimum 1)"
+  ],
+  "reasoning_chain": {{
+    "code_understanding": "Step 1 summary: structure and behaviour analysis",
+    "ac_verification": "Step 2 summary: per-AC pass/fail with code evidence",
+    "quality_assessment": "Step 3 summary: correctness, security, performance, maintainability",
+    "final_reasoning": "Step 4 summary: why the verdict was chosen based on the above"
+  }},
   "issues": [
     {{
       "id": "ISS-001",
@@ -187,7 +241,8 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
       "category": "functional or test or quality or performance",
       "description": "specific issue description",
       "acceptance_criterion": "AC-001",
-      "suggested_fix": "suggested fix direction"
+      "suggested_fix": "suggested fix direction",
+      "suggestion": "concrete fix direction — which file, which section, and how to change it"
     }}
   ],
   "passed_criteria": ["AC-001"],
@@ -288,6 +343,35 @@ def _error_json(model: str, error: str) -> str:
         "failed_criteria": [],
         "summary": f"{model} call failed",
     })
+
+
+def validate_objections(parsed: dict, model: str) -> dict:
+    """Validate that the parsed response contains required objections.
+
+    If the objections field is missing or empty, log a warning but preserve the
+    original verdict.  External LLMs may not reliably produce every requested
+    JSON field, so a missing objections list should not cascade into a total
+    evaluation failure.
+    """
+    # If the model already errored (e.g. CLI timeout, JSON parse failure),
+    # preserve the original error information — skip objection validation.
+    if parsed.get("verdict") == "error":
+        return parsed
+
+    raw = parsed.get("objections")
+    # Normalise to a list of non-empty strings
+    if isinstance(raw, list):
+        parsed["objections"] = [o for o in raw if isinstance(o, str) and o.strip()]
+    else:
+        parsed["objections"] = []
+
+    if not parsed["objections"]:
+        print(
+            f"[eval_dispatch] WARNING: {model}: objections field missing or empty. "
+            "Evaluators should provide at least one concrete concern or improvement.",
+            file=sys.stderr,
+        )
+    return parsed
 
 
 def extract_json(text: str) -> dict | None:
@@ -515,11 +599,20 @@ def compute_consensus(
     valid = {k: v for k, v in verdicts.items() if v.get("verdict") != "error"}
     error_models = [k for k, v in verdicts.items() if v.get("verdict") == "error"]
 
+    def _build_model_details(src: dict[str, dict]) -> dict[str, dict]:
+        details: dict[str, dict] = {}
+        for k, v in src.items():
+            d: dict = {"verdict": v.get("verdict")}
+            if v.get("reasoning_chain"):
+                d["reasoning_chain"] = v["reasoning_chain"]
+            details[k] = d
+        return details
+
     if not valid:
         return {
             "consensus_verdict": "error",
             "reason": "All external model calls failed",
-            "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+            "model_verdicts": _build_model_details(verdicts),
         }
 
     if len(valid) < min_valid_models:
@@ -527,7 +620,7 @@ def compute_consensus(
             "consensus_verdict": "error",
             "reason": f"Valid models {len(valid)} < minimum {min_valid_models} required. "
                       f"Failed models: {', '.join(error_models)}",
-            "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+            "model_verdicts": _build_model_details(verdicts),
         }
 
     verdict_values = [v["verdict"] for v in valid.values()]
@@ -546,6 +639,13 @@ def compute_consensus(
             issue["found_by"] = model_name
             all_issues.append(issue)
 
+    # Merge objections from all valid models
+    all_objections: dict[str, list[str]] = {}
+    for model_name, result in valid.items():
+        model_objections = result.get("objections", [])
+        if model_objections:
+            all_objections[model_name] = model_objections
+
     # Merge failed criteria
     all_failed = set()
     all_passed = set()
@@ -560,8 +660,9 @@ def compute_consensus(
 
     result = {
         "consensus_verdict": consensus,
-        "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
+        "model_verdicts": _build_model_details(verdicts),
         "issues": all_issues,
+        "objections": all_objections,
         "passed_criteria": sorted(all_passed),
         "failed_criteria": sorted(all_failed),
     }
@@ -571,6 +672,84 @@ def compute_consensus(
         result["convergence_ratio"] = convergence_ratio
 
     return result
+
+
+def check_verdict_conflict(verdicts: dict[str, dict]) -> bool:
+    """Check if valid model verdicts conflict (hard pass/fail disagreement).
+
+    Returns True only when some models say pass/partial_pass and others say fail.
+    Models with verdict 'error' are excluded from the check.
+    Soft disagreements (pass vs partial_pass) do not count as conflicts.
+    """
+    valid = {k: v for k, v in verdicts.items() if v.get("verdict") not in ("error", None)}
+    if len(valid) < 2:
+        return False
+    verdict_values = {v["verdict"] for v in valid.values()}
+    # Only conflict if there's a mix of fail and non-fail
+    has_fail = "fail" in verdict_values
+    has_non_fail = bool(verdict_values - {"fail"})
+    return has_fail and has_non_fail
+
+
+def build_round2_prompt(base_prompt: str, round1_verdicts: dict[str, dict]) -> str:
+    """Build a round-2 prompt that includes round-1 verdicts and reasoning.
+
+    Uses the same JSON response schema as round 1.
+    """
+    round1_summary_parts: list[str] = []
+    for model, result in round1_verdicts.items():
+        if result.get("verdict") == "error":
+            continue
+        verdict = result.get("verdict", "unknown")
+        summary = result.get("summary", "No summary provided")
+        reasoning_issues = result.get("issues", [])
+        issues_text = ""
+        if reasoning_issues:
+            issue_lines = [
+                f"  - [{iss.get('severity', '?')}] {iss.get('description', 'N/A')}"
+                for iss in reasoning_issues[:10]
+            ]
+            issues_text = "\n".join(issue_lines)
+        round1_summary_parts.append(
+            f"### {model}\n- Verdict: {verdict}\n- Summary: {summary}"
+            + (f"\n- Issues:\n{issues_text}" if issues_text else "")
+        )
+
+    round1_block = "\n\n".join(round1_summary_parts)
+
+    return f"""{base_prompt}
+
+---
+
+## Round 2 — Cross-Verification
+
+The following models provided conflicting assessments in Round 1. Review their reasoning and provide your independent verdict:
+
+{round1_block}
+
+Given the conflicting assessments above, re-examine the code against the contract criteria and provide your own independent verdict. Respond ONLY in the same JSON format specified above."""
+
+_REASONING_CHAIN_KEYS = ("code_understanding", "ac_verification", "quality_assessment", "final_reasoning")
+
+
+def _warn_if_missing_reasoning_chain(model: str, parsed: dict) -> None:
+    """Log a warning if reasoning_chain is absent or incomplete.
+
+    This is a soft check for backward-compatibility — it does NOT set verdict to error.
+    """
+    chain = parsed.get("reasoning_chain")
+    if chain is None:
+        print(f"[eval_dispatch] WARNING: {model} response missing reasoning_chain", file=sys.stderr)
+        return
+    if not isinstance(chain, dict):
+        print(f"[eval_dispatch] WARNING: {model} reasoning_chain is not a dict", file=sys.stderr)
+        return
+    missing = [k for k in _REASONING_CHAIN_KEYS if not chain.get(k)]
+    if missing:
+        print(
+            f"[eval_dispatch] WARNING: {model} reasoning_chain incomplete, missing: {', '.join(missing)}",
+            file=sys.stderr,
+        )
 
 
 def load_config() -> dict:
@@ -689,13 +868,15 @@ def main() -> int:
     print(f"[eval_dispatch] Evaluation models: {models} (parallel calls)", file=sys.stderr)
     verdicts: dict[str, dict] = {}
 
-    def _call_and_parse(model: str) -> tuple[str, dict]:
+    def _call_and_parse(model: str, eval_prompt: str) -> tuple[str, dict]:
         """Call a single model and parse JSON response."""
         print(f"[eval_dispatch] Calling {model}...", file=sys.stderr)
-        raw = call_model(model, prompt, timeout=args.timeout)
+        raw = call_model(model, eval_prompt, timeout=args.timeout)
         parsed = extract_json(raw)
         if parsed:
+            parsed = validate_objections(parsed, model)
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
+            _warn_if_missing_reasoning_chain(model, parsed)
             return model, parsed
         print(f"[eval_dispatch] {model} raw output (first 500): {raw[:500]}", file=sys.stderr)
         print(f"[eval_dispatch] {model} parsing failed", file=sys.stderr)
@@ -708,11 +889,39 @@ def main() -> int:
             "summary": "Response parsing failed",
         }
 
+    # --- Round 1 ---
+    print("[eval_dispatch] Round 1: initial evaluation", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
-        futures = {executor.submit(_call_and_parse, m): m for m in models}
+        futures = {executor.submit(_call_and_parse, m, prompt): m for m in models}
         for future in concurrent.futures.as_completed(futures):
             model_name, result = future.result()
             verdicts[model_name] = result
+
+    round1_verdicts = dict(verdicts)
+    evaluation_rounds = 1
+    round2_verdicts: dict[str, dict] | None = None
+
+    # --- Round 2 (only if verdicts conflict) ---
+    if check_verdict_conflict(verdicts):
+        evaluation_rounds = 2
+        print("[eval_dispatch] Round 1 verdicts conflict — starting Round 2 cross-verification", file=sys.stderr)
+        round2_prompt = build_round2_prompt(prompt, round1_verdicts)
+        round2_verdicts = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
+            futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
+            for future in concurrent.futures.as_completed(futures):
+                model_name, result = future.result()
+                round2_verdicts[model_name] = result
+
+        # Use round 2 verdicts only if quorum is maintained
+        round2_valid = {k: v for k, v in round2_verdicts.items() if v.get("verdict") != "error"}
+        if len(round2_valid) >= args.min_models:
+            verdicts = round2_verdicts
+        else:
+            print(f"[eval_dispatch] Round 2 quorum lost ({len(round2_valid)} valid < {args.min_models} required), using round 1 results", file=sys.stderr)
+    else:
+        print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
 
     # Compute consensus (pass known criteria from contract for missing-criterion detection)
     known_criteria = parse_acceptance_criteria(contract)
@@ -727,8 +936,11 @@ def main() -> int:
         "verdict": consensus["consensus_verdict"],
         "model_verdicts": consensus.get("model_verdicts", {}),
         "issues": consensus.get("issues", []),
+        "objections": consensus.get("objections", {}),
         "passed_criteria": consensus.get("passed_criteria", []),
         "failed_criteria": consensus.get("failed_criteria", []),
+        "evaluation_rounds": evaluation_rounds,
+        "round1_verdicts": {k: v.get("verdict") for k, v in round1_verdicts.items()},
     }
 
     # Include per-criterion results and convergence ratio if available
@@ -736,7 +948,18 @@ def main() -> int:
         result["criteria_results"] = consensus["criteria_results"]
         result["convergence_ratio"] = consensus["convergence_ratio"]
 
+    if round2_verdicts is not None:
+        result["round2_verdicts"] = {k: v.get("verdict") for k, v in round2_verdicts.items()}
     result["status_action"] = derive_status_action(result["verdict"], result["issues"])
+
+    # Aggregate reasoning_chain from consensus model_verdicts (already computed)
+    reasoning_chains = {
+        name: detail["reasoning_chain"]
+        for name, detail in consensus.get("model_verdicts", {}).items()
+        if detail.get("reasoning_chain")
+    }
+    if reasoning_chains:
+        result["reasoning_chain"] = reasoning_chains
 
     # Include reason if error
     if consensus.get("reason"):
