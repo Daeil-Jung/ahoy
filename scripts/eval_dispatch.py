@@ -112,6 +112,23 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 ## Implemented Code
 {code_snippets}
 
+## Review Instructions
+1. Strictly evaluate whether each acceptance criterion (AC) is satisfied
+2. Identify issues from code quality, security, and performance perspectives
+3. Do not give lenient verdicts like "this is good enough"
+4. Do not trust claims in the Generator report — read and judge the code directly
+
+## Forced Objection
+- List at least one concern or improvement, even if minor.
+- Even if the implementation looks correct, you MUST provide at least one concrete suggestion for improvement (e.g., edge cases, naming, documentation, test coverage, error handling).
+- If you cannot find any issue, suggest a minor improvement anyway — no review is complete without at least one actionable objection.
+
+## Active Rejection
+- Do NOT default to PASS — justify your verdict with specific evidence.
+- A "pass" verdict requires explicit justification for why each acceptance criterion is met.
+- If in doubt, lean toward "partial_pass" or "fail" rather than "pass".
+
+5. Respond ONLY in the following JSON format (no text outside JSON):
 ## Evaluation Process — follow these 4 steps IN ORDER
 
 ### Step 1 — Code Understanding
@@ -143,6 +160,9 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
 ```json
 {{
   "verdict": "pass or partial_pass or fail",
+  "objections": [
+    "at least one concrete concern or improvement suggestion (REQUIRED, minimum 1)"
+  ],
   "reasoning_chain": {{
     "code_understanding": "Step 1 summary: structure and behaviour analysis",
     "ac_verification": "Step 2 summary: per-AC pass/fail with code evidence",
@@ -258,6 +278,35 @@ def _error_json(model: str, error: str) -> str:
         "failed_criteria": [],
         "summary": f"{model} call failed",
     })
+
+
+def validate_objections(parsed: dict, model: str) -> dict:
+    """Validate that the parsed response contains required objections.
+
+    If the objections field is missing or empty, log a warning but preserve the
+    original verdict.  External LLMs may not reliably produce every requested
+    JSON field, so a missing objections list should not cascade into a total
+    evaluation failure.
+    """
+    # If the model already errored (e.g. CLI timeout, JSON parse failure),
+    # preserve the original error information — skip objection validation.
+    if parsed.get("verdict") == "error":
+        return parsed
+
+    raw = parsed.get("objections")
+    # Normalise to a list of non-empty strings
+    if isinstance(raw, list):
+        parsed["objections"] = [o for o in raw if isinstance(o, str) and o.strip()]
+    else:
+        parsed["objections"] = []
+
+    if not parsed["objections"]:
+        print(
+            f"[eval_dispatch] WARNING: {model}: objections field missing or empty. "
+            "Evaluators should provide at least one concrete concern or improvement.",
+            file=sys.stderr,
+        )
+    return parsed
 
 
 def extract_json(text: str) -> dict | None:
@@ -424,6 +473,13 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
             issue["found_by"] = model_name
             all_issues.append(issue)
 
+    # Merge objections from all valid models
+    all_objections: dict[str, list[str]] = {}
+    for model_name, result in valid.items():
+        model_objections = result.get("objections", [])
+        if model_objections:
+            all_objections[model_name] = model_objections
+
     # Merge failed criteria
     all_failed = set()
     all_passed = set()
@@ -437,6 +493,7 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
         "consensus_verdict": consensus,
         "model_verdicts": _build_model_details(verdicts),
         "issues": all_issues,
+        "objections": all_objections,
         "passed_criteria": sorted(all_passed),
         "failed_criteria": sorted(all_failed),
     }
@@ -541,6 +598,7 @@ def main() -> int:
         raw = call_model(model, prompt, timeout=args.timeout)
         parsed = extract_json(raw)
         if parsed:
+            parsed = validate_objections(parsed, model)
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
             _warn_if_missing_reasoning_chain(model, parsed)
             return model, parsed
@@ -573,6 +631,7 @@ def main() -> int:
         "verdict": consensus["consensus_verdict"],
         "model_verdicts": consensus.get("model_verdicts", {}),
         "issues": consensus.get("issues", []),
+        "objections": consensus.get("objections", {}),
         "passed_criteria": consensus.get("passed_criteria", []),
         "failed_criteria": consensus.get("failed_criteria", []),
     }
