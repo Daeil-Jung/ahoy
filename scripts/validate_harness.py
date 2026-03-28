@@ -344,11 +344,17 @@ def check_circuit_breaker() -> None:
     if not current_sprint:
         return
 
+    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+
+    # Skip circuit breaker if the current evaluation passed
+    current_issues = load_json(sprint_dir / "issues.json")
+    if current_issues and current_issues.get("status_action") == "passed":
+        print("[validate_harness] Circuit breaker skipped — status_action is passed", file=sys.stderr)
+        return
+
     idx = state.get("current_sprint_index", 0)
     sprint_obj = state["sprints"][idx]
     current_attempt = sprint_obj.get("attempt", 0)
-
-    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
     pattern = detect_failure_pattern(sprint_dir, current_attempt)
 
     # Output the pattern as structured JSON so the orchestrator can persist it
