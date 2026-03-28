@@ -6,15 +6,18 @@ Supports extended verification: test_command, lint_command, type_check_command, 
 
 Usage: validate_harness.py <check_type>
   check_type:
-    scope-check      — Before Edit/Write: verify target file is within contract.md Implementation Scope
-    pre-state-write  — Before writing harness_state.json: verify external evaluation exists before leaving generated
-    post-state-write — After writing harness_state.json: verify status=passed <-> status_action consistency
-    pre-gen          — Before Generator execution: verify contract.md exists
-    post-eval        — After evaluation: verify external model verdict in issues.json
-    guard-eval-files — Block direct writing of issues.json (only eval_dispatch.py allowed)
-    pre-commit       — Run tests, lint, and type check before commit (only in harness mode)
-    pre-push         — Run tests, lint, type check + verify state consistency before push
+    scope-check          — Before Edit/Write: verify target file is within contract.md Implementation Scope
+    pre-state-write      — Before writing harness_state.json: verify external evaluation exists before leaving generated
+    post-state-write     — After writing harness_state.json: verify status=passed <-> status_action consistency
+    pre-gen              — Before Generator execution: verify contract.md exists
+    post-eval            — After evaluation: verify external model verdict in issues.json
+    guard-eval-files     — Block direct writing of issues.json (only eval_dispatch.py allowed)
+    pre-commit           — Run tests, lint, and type check before commit (only in harness mode)
+    pre-push             — Run tests, lint, type check + verify state consistency before push
+    post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -542,6 +545,138 @@ def check_scope() -> None:
     )
 
 
+# ── Post-edit quality patterns ─────────────────────────────────
+
+_TEST_FILE_PATTERNS = (
+    "test_",
+    "_test.py",
+    "/tests/",
+    "/__tests__/",
+    ".test.",
+    ".spec.",
+)
+
+_MARKER_PATTERN = re.compile(
+    r"\b(TODO|FIXME|HACK|XXX)\b",
+)
+
+_STUB_PATTERNS = [
+    re.compile(r"^\s*pass\s*$"),
+    re.compile(r"^\s*\.\.\.\s*$"),
+    re.compile(r"""throw\s+new\s+Error\s*\(\s*["']not implemented["']\s*\)""", re.IGNORECASE),
+    re.compile(r"""raise\s+NotImplementedError"""),
+]
+
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\b(lorem|foo|bar|baz|test123|placeholder)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Return True if *file_path* (forward-slash normalized) looks like a test file."""
+    return any(pat in file_path for pat in _TEST_FILE_PATTERNS)
+
+
+def _load_allowlist() -> set[str]:
+    """Load allowed patterns from .ahoy-allowlist (one pattern per line)."""
+    allowlist: set[str] = set()
+    allowlist_path = Path(".ahoy-allowlist")
+    if allowlist_path.exists():
+        for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                allowlist.add(line)
+    return allowlist
+
+
+def _line_allowed(line: str, allowlist: set[str]) -> bool:
+    """Return True if *line* matches any entry in the allowlist."""
+    return any(entry in line for entry in allowlist)
+
+
+def check_post_edit_quality() -> None:
+    """Detect TODO/FIXME/stub/placeholder patterns injected by Edit/Write."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+
+    # Normalize path separators for consistent matching
+    file_path_normalized = file_path.replace("\\", "/")
+
+    # Skip test files — patterns like TODO/placeholder are acceptable there
+    if _is_test_file(file_path_normalized):
+        return
+
+    # Skip non-text / binary-likely extensions
+    text_extensions = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
+        ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+        ".kt", ".scala", ".sh", ".bash", ".zsh", ".ps1",
+        ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css",
+        ".md", ".txt", ".cfg", ".ini", ".env", ".sql",
+    }
+    ext = Path(file_path).suffix.lower()
+    if ext and ext not in text_extensions:
+        return
+
+    target = Path(file_path)
+    if not target.exists():
+        return
+
+    try:
+        content = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+
+    allowlist = _load_allowlist()
+    violations: list[str] = []
+
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if _line_allowed(line, allowlist):
+            continue
+
+        # Check TODO/FIXME/HACK/XXX markers
+        marker_match = _MARKER_PATTERN.search(line)
+        if marker_match:
+            violations.append(f"  L{lineno}: {marker_match.group()} marker — {line.strip()}")
+            continue
+
+        # Check stub-only implementations
+        for stub_re in _STUB_PATTERNS:
+            if stub_re.search(line):
+                violations.append(f"  L{lineno}: stub pattern — {line.strip()}")
+                break
+        else:
+            # Check placeholder strings
+            ph_match = _PLACEHOLDER_PATTERN.search(line)
+            if ph_match:
+                violations.append(f"  L{lineno}: placeholder '{ph_match.group()}' — {line.strip()}")
+
+    if violations:
+        detail = "\n".join(violations[:20])  # cap output length
+        extra = ""
+        if len(violations) > 20:
+            extra = f"\n  ... and {len(violations) - 20} more"
+        fail(
+            f"[HARNESS-GUARD] Blocked: Quality issues detected in '{file_path}':\n"
+            f"{detail}{extra}\n"
+            "[HARNESS-GUARD] Remove TODO/FIXME markers, stubs, and placeholders before saving.\n"
+            "[HARNESS-GUARD] If intentional, add the pattern to .ahoy-allowlist."
+        )
+
+    info(f"[HARNESS-GUARD] Passed: Post-edit quality check — '{file_path}'")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
@@ -553,6 +688,7 @@ CHECKS = {
     "guard-eval-files": check_guard_eval_files,
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
+    "post-edit-quality": check_post_edit_quality,
 }
 
 
