@@ -1,0 +1,4 @@
+{
+  "eval_models": ["codex", "gemini"],
+  "min_models": 2
+}
