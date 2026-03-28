@@ -1083,7 +1083,7 @@ def main() -> int:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
             futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
             for future in concurrent.futures.as_completed(futures):
-                model_name, result = future.result()
+                model_name, result, _raw = future.result()
                 round2_verdicts[model_name] = result
 
         # Use round 2 verdicts only if quorum is maintained

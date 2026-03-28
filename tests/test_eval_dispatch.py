@@ -45,6 +45,22 @@ def test_build_eval_prompt_includes_sanitized_generator_report():
     assert "### file.py" in prompt
 
 
+def test_parse_acceptance_criteria_extracts_explicit_and_implicit_ids():
+    contract = "\n".join(
+        [
+            "## Acceptance Criteria",
+            "- AC-001: first criterion",
+            "- second criterion",
+            "  - nested detail should be ignored",
+        ]
+    )
+
+    assert eval_dispatch.parse_acceptance_criteria(contract) == [
+        {"id": "AC-001", "description": "first criterion"},
+        {"id": "AC-1", "description": "second criterion"},
+    ]
+
+
 def test_extract_json_reads_fenced_and_embedded_payloads():
     fenced = "```json\n{\"verdict\": \"pass\"}\n```"
     embedded = 'prefix {"verdict": "fail", "issues": []} suffix'
@@ -136,9 +152,9 @@ def test_compute_consensus_enforces_minimum_valid_models_and_merges_results():
 
     assert consensus["consensus_verdict"] == "fail"
     assert consensus["model_verdicts"] == {
-        "codex": "partial_pass",
-        "claude": "fail",
-        "gemini": "error",
+        "codex": {"verdict": "partial_pass"},
+        "claude": {"verdict": "fail"},
+        "gemini": {"verdict": "error"},
     }
     assert consensus["passed_criteria"] == ["AC-001"]
     assert consensus["failed_criteria"] == ["AC-002"]
@@ -167,6 +183,125 @@ def test_compute_consensus_returns_error_when_all_models_fail():
 
     assert consensus["consensus_verdict"] == "error"
     assert consensus["reason"] == "All external model calls failed"
+
+
+def test_validate_objections_normalizes_non_empty_strings():
+    parsed = {"verdict": "pass", "objections": [" one ", "", 3]}
+
+    validated = eval_dispatch.validate_objections(parsed, "codex")
+
+    assert validated["objections"] == [" one "]
+
+
+def test_merge_criteria_results_marks_missing_criteria_as_fail():
+    merged, ratio = eval_dispatch._merge_criteria_results(
+        {
+            "codex": {
+                "criteria_results": [
+                    {
+                        "criterion_id": "AC-1",
+                        "description": "first",
+                        "verdict": "pass",
+                        "evidence": "ok",
+                    }
+                ]
+            },
+            "claude": {
+                "criteria_results": [
+                    {
+                        "criterion_id": "AC-2",
+                        "description": "second",
+                        "verdict": "pass",
+                        "evidence": "ok",
+                    }
+                ]
+            },
+        },
+        known_criteria=[{"id": "AC-1", "description": "first"}, {"id": "AC-2", "description": "second"}],
+    )
+
+    assert ratio == 0.0
+    assert [item["criterion_id"] for item in merged] == ["AC-1", "AC-2"]
+    assert all(item["verdict"] == "fail" for item in merged)
+
+
+def test_check_verdict_conflict_detects_hard_disagreement():
+    assert eval_dispatch.check_verdict_conflict(
+        {
+            "codex": {"verdict": "pass"},
+            "claude": {"verdict": "fail"},
+            "gemini": {"verdict": "error"},
+        }
+    )
+    assert not eval_dispatch.check_verdict_conflict(
+        {
+            "codex": {"verdict": "pass"},
+            "claude": {"verdict": "partial_pass"},
+        }
+    )
+
+
+def test_build_round2_prompt_includes_round1_summaries():
+    prompt = eval_dispatch.build_round2_prompt(
+        "BASE",
+        {
+            "codex": {"verdict": "fail", "summary": "bad", "issues": [{"severity": "major", "description": "oops"}]},
+            "claude": {"verdict": "error"},
+        },
+    )
+
+    assert "Round 2" in prompt
+    assert "### codex" in prompt
+    assert "oops" in prompt
+    assert "### claude" not in prompt
+
+
+def test_parse_usage_prefers_embedded_usage_and_falls_back_to_estimate():
+    parsed = {"usage": {"input_tokens": 10, "output_tokens": 5}}
+    assert eval_dispatch.parse_usage("ignored", parsed=parsed) == {"input_tokens": 10, "output_tokens": 5}
+    assert eval_dispatch.parse_usage("12345678", parsed=None) == {"input_tokens": 0, "output_tokens": 2}
+
+
+def test_update_cost_tracking_and_limit_checks(tmp_path: Path):
+    harness_state = tmp_path / "harness_state.json"
+
+    eval_dispatch.update_cost_tracking(harness_state, eval_calls=2, tokens=100, sprint_id="sprint-001", attempt=1)
+    payload = json.loads(harness_state.read_text(encoding="utf-8"))
+
+    assert payload["cost_tracking"]["total_eval_calls"] == 2
+    assert payload["cost_tracking"]["total_tokens"] == 100
+    assert payload["cost_tracking"]["history"][0]["sprint_id"] == "sprint-001"
+    assert eval_dispatch.check_cost_limit(
+        harness_state,
+        {"cost_limit": {"max_eval_calls": 1, "max_tokens": 1000}},
+        pending_calls=0,
+    )
+    assert eval_dispatch.check_cost_limit(
+        harness_state,
+        {"cost_limit": {"max_eval_calls": 5, "max_tokens": 50}},
+        pending_calls=0,
+    )
+    assert not eval_dispatch.check_cost_limit(
+        harness_state,
+        {"cost_limit": {"max_eval_calls": 5, "max_tokens": 200}},
+        pending_calls=1,
+    )
+
+
+def test_record_convergence_updates_matching_sprint(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    state_file = project_root / ".claude" / "harness" / "harness_state.json"
+    state_file.write_text(
+        json.dumps({"sprints": [{"sprint_id": "sprint-001", "attempt": 2}]}),
+        encoding="utf-8",
+    )
+
+    eval_dispatch._record_convergence(sprint_dir, project_root, 0.75)
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["sprints"][0]["convergence_history"][0]["convergence_ratio"] == 0.75
 
 
 @pytest.mark.parametrize(
@@ -250,7 +385,7 @@ def test_load_config_reads_plugin_config(monkeypatch: pytest.MonkeyPatch, tmp_pa
     config_path.write_text('{"eval_models": ["codex", "gemini"]}', encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
 
-    assert eval_dispatch.load_config() == {"eval_models": ["codex", "gemini"]}
+    assert eval_dispatch.load_config() == {"eval_models": ["codex", "gemini"], "cost_limit": None}
 
 
 def test_main_writes_error_result_when_no_declared_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -313,4 +448,82 @@ def test_main_writes_consensus_result(monkeypatch: pytest.MonkeyPatch, tmp_path:
     payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
     assert payload["verdict"] == "pass"
     assert payload["status_action"] == "passed"
-    assert payload["models_valid"] == ["codex", "claude"]
+    assert sorted(payload["models_valid"]) == ["claude", "codex"]
+
+
+def test_main_aborts_when_cost_limit_is_exceeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("AC-001", encoding="utf-8")
+    harness_state = tmp_path / ".claude" / "harness"
+    harness_state.mkdir(parents=True)
+    (harness_state / "harness_state.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(eval_dispatch, "load_config", lambda: {"eval_models": ["codex"], "min_models": 1, "cost_limit": {"max_eval_calls": 0}})
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--project-root", str(tmp_path)],
+    )
+
+    assert eval_dispatch.main() == 1
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert payload["error_reason"] == "Cost limit exceeded"
+
+
+def test_main_uses_round2_when_round1_has_conflict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("## Acceptance Criteria\n- AC-1: works", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `scripts/example.py`\n", encoding="utf-8")
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+    harness_dir = project_root / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps({"sprints": [{"sprint_id": "sprint-001", "attempt": 1}]}),
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        calls.append(prompt)
+        round_number = len(calls) // 2 + (1 if len(calls) % 2 else 0)
+        if "Round 2" not in prompt:
+            verdict = "fail" if model == "codex" else "pass"
+        else:
+            verdict = "partial_pass"
+        return json.dumps(
+            {
+                "verdict": verdict,
+                "objections": ["improve docs"],
+                "criteria_results": [
+                    {"criterion_id": "AC-1", "description": "works", "verdict": "pass", "evidence": "ok"}
+                ],
+                "issues": [],
+                "passed_criteria": ["AC-1"],
+                "failed_criteria": [],
+                "summary": f"{model} round {round_number}",
+                "reasoning_chain": {
+                    "code_understanding": "a",
+                    "ac_verification": "b",
+                    "quality_assessment": "c",
+                    "final_reasoning": "d",
+                },
+            }
+        )
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    assert eval_dispatch.main() == 0
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert payload["evaluation_rounds"] == 2
+    assert payload["round2_verdicts"] == {"codex": "partial_pass", "claude": "partial_pass"}
+    assert payload["convergence_ratio"] == 1.0

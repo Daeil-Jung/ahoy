@@ -148,6 +148,28 @@ def test_verify_issues_integrity_detects_missing_fields_and_bad_timestamp(tmp_pa
     assert validate_harness.verify_issues_integrity(invalid_ts) == "FAIL:invalid_timestamp"
 
 
+def test_failure_pattern_helpers(tmp_path: Path):
+    issues = [
+        {"category": "functional", "description": "Scope regression bug"},
+        {"category": "test", "description": "TODO left behind"},
+    ]
+    assert validate_harness.classify_failure_type(issues) == ["scope_violation", "test_failure"]
+    assert validate_harness._issues_signature(issues) == {
+        "functional::scope regression bug",
+        "test::todo left behind",
+    }
+
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "issues.json.attempt-1").write_text(json.dumps({"issues": issues}), encoding="utf-8")
+    (sprint_dir / "issues.json").write_text(json.dumps({"issues": issues}), encoding="utf-8")
+
+    assert validate_harness._load_attempt_issues(sprint_dir, 1) == issues
+    detected = validate_harness.detect_failure_pattern(sprint_dir, 2)
+    assert detected["circuit_break"]
+    assert "scope regression bug" in detected["repeated_issues"]
+
+
 def test_check_scope_allows_in_scope_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     write_harness_state(tmp_path)
@@ -219,6 +241,12 @@ def test_check_scope_blocks_out_of_scope_files(monkeypatch: pytest.MonkeyPatch, 
         validate_harness.check_scope()
 
 
+def test_path_matching_helper():
+    assert validate_harness._path_matches_scope_entry("src/app.py", "app.py")
+    assert validate_harness._path_matches_scope_entry("src/app.py", "src/app.py")
+    assert not validate_harness._path_matches_scope_entry("src/app.py", "other.py")
+
+
 def test_check_pre_state_write_requires_valid_evaluation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     write_harness_state(tmp_path, status="generated")
@@ -288,6 +316,49 @@ def test_check_guard_eval_files_always_blocks():
         validate_harness.check_guard_eval_files()
 
 
+def test_check_circuit_breaker_blocks_on_repeated_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps(
+            {
+                "current_sprint_index": 0,
+                "sprints": [{"sprint_id": "sprint-001", "status": "failed", "attempt": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sprint_dir = harness_dir / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    issues = [{"category": "functional", "description": "same bug"}]
+    (sprint_dir / "issues.json").write_text(json.dumps({"issues": issues, "status_action": "failed"}), encoding="utf-8")
+    (sprint_dir / "issues.json.attempt-1").write_text(json.dumps({"issues": issues}), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_circuit_breaker()
+
+
+def test_check_circuit_breaker_skips_when_passed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps(
+            {
+                "current_sprint_index": 0,
+                "sprints": [{"sprint_id": "sprint-001", "status": "passed", "attempt": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sprint_dir = harness_dir / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    (sprint_dir / "issues.json").write_text(json.dumps({"issues": [], "status_action": "passed"}), encoding="utf-8")
+
+    validate_harness.check_circuit_breaker()
+
+
 def test_check_pre_gen_requires_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     write_harness_state(tmp_path)
@@ -302,6 +373,51 @@ def test_check_pre_gen_passes_with_contract(monkeypatch: pytest.MonkeyPatch, tmp
     write_contract(tmp_path, "## Implementation Scope")
 
     validate_harness.check_pre_gen()
+
+
+def test_audit_final_scope_blocks_out_of_scope_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    write_contract(tmp_path, "## Implementation Scope\n### Files to Modify\n- `scripts/eval_dispatch.py`")
+
+    class Result:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = iter(
+        [
+            Result(0, "ok"),
+            Result(0, "docs/README.ko.md\n"),
+            Result(0, ""),
+        ]
+    )
+    monkeypatch.setattr(validate_harness.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    with pytest.raises(SystemExit):
+        validate_harness.audit_final_scope()
+
+
+def test_post_edit_quality_detects_markers_and_respects_allowlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".ahoy-allowlist").write_text("TODO: allowed\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "scripts/example.py", "content": "TODO: blocked\nTODO: allowed\n"}),
+    )
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_edit_quality()
+
+
+def test_post_edit_quality_skips_test_files(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "tests/test_example.py", "content": "TODO: allowed in tests"}),
+    )
+
+    validate_harness.check_post_edit_quality()
 
 
 def test_run_tests_with_coverage_blocks_when_threshold_not_met(monkeypatch: pytest.MonkeyPatch):
