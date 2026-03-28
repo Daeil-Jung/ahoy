@@ -71,6 +71,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "uv run python \"${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py\" post-edit-quality"
+          },
+          {
+            "type": "command",
             "command": "echo '[CX-HARNESS] Post-edit auto-check: Verify the change works. If tests exist, run them silently. Record changes concretely - no vague expressions.'"
           }
         ]
