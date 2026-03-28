@@ -678,8 +678,12 @@ def update_cost_tracking(
     )
 
 
-def check_cost_limit(harness_state_path: Path, config: dict) -> bool:
+def check_cost_limit(harness_state_path: Path, config: dict, pending_calls: int = 0) -> bool:
     """Return True if accumulated costs exceed the configured limit (abort).
+
+    When *pending_calls* > 0 the check also verifies that the totals **after**
+    this run would still be within limits, preventing an overshoot that would
+    only be caught on the next invocation.
 
     Returns False (no abort) when ``cost_limit`` is ``None`` or absent.
     """
@@ -699,7 +703,7 @@ def check_cost_limit(harness_state_path: Path, config: dict) -> bool:
     max_calls = cost_limit.get("max_eval_calls")
     max_tokens = cost_limit.get("max_tokens")
 
-    if max_calls is not None and total_calls >= max_calls:
+    if max_calls is not None and total_calls + pending_calls > max_calls:
         return True
     if max_tokens is not None and total_tokens >= max_tokens:
         return True
@@ -727,8 +731,8 @@ def main() -> int:
     # Resolve harness_state.json path for cost tracking
     harness_state_path = project_root / ".claude" / "harness" / "harness_state.json"
 
-    # Check cost limit before proceeding
-    if check_cost_limit(harness_state_path, config):
+    # Check cost limit before proceeding (include pending calls for this run)
+    if check_cost_limit(harness_state_path, config, pending_calls=len(models)):
         cost_limit = config.get("cost_limit", {})
         print(
             f"ABORT: Cost limit exceeded. "
@@ -808,14 +812,22 @@ def main() -> int:
     total_tokens_this_run = 0
     prompt_tokens_estimate = len(prompt) // 4
     for model_name, raw in raw_responses.items():
-        usage = parse_usage(raw, parsed=verdicts.get(model_name))
+        parsed_verdict = verdicts.get(model_name, {})
+        # Skip prompt token estimation for models that errored locally
+        # (e.g. CLI not found, timeout) — no tokens were actually sent.
+        is_local_error = (
+            parsed_verdict.get("verdict") == "error"
+            and "call failed" in parsed_verdict.get("summary", "")
+        )
+        usage = parse_usage(raw, parsed=parsed_verdict)
         total_tokens_this_run += usage["output_tokens"]
-        if usage["input_tokens"] > 0:
-            # Model returned real usage data — use it directly
-            total_tokens_this_run += usage["input_tokens"]
-        else:
-            # No real input token data — use prompt-length estimate as fallback
-            total_tokens_this_run += prompt_tokens_estimate
+        if not is_local_error:
+            if usage["input_tokens"] > 0:
+                # Model returned real usage data — use it directly
+                total_tokens_this_run += usage["input_tokens"]
+            else:
+                # No real input token data — use prompt-length estimate as fallback
+                total_tokens_this_run += prompt_tokens_estimate
 
     # Read the current sprint's attempt number from harness_state.json
     current_attempt = 0
