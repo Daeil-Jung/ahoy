@@ -269,12 +269,31 @@ def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
 
     The convention is ``issues.json.attempt-N`` for archived attempts, while
     ``issues.json`` always holds the *current* attempt.
+
+    Falls back to the current ``issues.json`` when no backup file exists
+    (e.g. for attempt 0 or when backups have not been created yet).
     """
     backup = sprint_dir / f"issues.json.attempt-{attempt}"
     if backup.exists():
         data = load_json(backup)
         if data and isinstance(data.get("issues"), list):
             return data["issues"]
+
+    # Fallback: try loading the current issues.json for comparison
+    current = sprint_dir / "issues.json"
+    data = load_json(current)
+    if data and isinstance(data.get("issues"), list):
+        print(
+            f"[HARNESS-GUARD] Warning: issues.json.attempt-{attempt} not found, "
+            f"falling back to current issues.json",
+            file=sys.stderr,
+        )
+        return data["issues"]
+
+    print(
+        f"[HARNESS-GUARD] Warning: No issues data found for attempt {attempt}",
+        file=sys.stderr,
+    )
     return []
 
 
@@ -322,8 +341,12 @@ def check_circuit_breaker() -> None:
     """Detect repeated failure patterns across rework attempts.
 
     This check runs after evaluation.  If the same issues appear in two
-    consecutive attempts it emits a warning (info-level, not a hard block)
-    and records the pattern in ``harness_state.json``.
+    consecutive attempts it blocks the transition via ``fail()`` and outputs
+    the failure pattern as structured JSON to stdout so the orchestrator can
+    read and persist it.
+
+    ``validate_harness.py`` must NOT write ``harness_state.json`` directly —
+    state writes are the orchestrator's responsibility.
     """
     state = load_state()
     current_sprint = get_current_sprint(state)
@@ -337,17 +360,14 @@ def check_circuit_breaker() -> None:
     sprint_dir = HARNESS_DIR / "sprints" / current_sprint
     pattern = detect_failure_pattern(sprint_dir, current_attempt)
 
-    sprint_obj["failure_pattern"] = pattern
-    try:
-        STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass
+    # Output the pattern as structured JSON so the orchestrator can persist it
+    print(json.dumps({"circuit_breaker_result": pattern}))
 
     if pattern.get("circuit_break"):
         repeated = pattern.get("repeated_issues", [])
         ftypes = pattern.get("failure_types", [])
-        info(
-            "[HARNESS-GUARD] WARNING: Circuit breaker triggered — repeated failure pattern detected\n"
+        fail(
+            "[HARNESS-GUARD] Blocked: Circuit breaker triggered — repeated failure pattern detected\n"
             f"[HARNESS-GUARD]   Repeated issues: {', '.join(repeated)}\n"
             f"[HARNESS-GUARD]   Failure types: {', '.join(ftypes)}\n"
             "[HARNESS-GUARD]   Recommendation: mark sprint as 'failed' instead of continuing rework.\n"
