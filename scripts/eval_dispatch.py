@@ -330,6 +330,23 @@ def derive_status_action(verdict: str, issues: list[dict]) -> str:
     return "error"
 
 
+def _error_result(sprint_dir: Path, models: list[str], reason: str) -> dict:
+    """Build an error-state result dict for early-abort paths."""
+    return {
+        "sprint": sprint_dir.name,
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "models_used": models,
+        "models_valid": [],
+        "verdict": "error",
+        "model_verdicts": {},
+        "issues": [],
+        "passed_criteria": [],
+        "failed_criteria": [],
+        "error_reason": reason,
+        "status_action": "error",
+    }
+
+
 def write_result(sprint_dir: Path, result: dict) -> None:
     issues_path = sprint_dir / "issues.json"
     issues_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -434,7 +451,9 @@ def parse_usage(response: str, parsed: dict | None = None) -> dict:
             "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
         }
 
-    # Fallback: rough estimate based on character length (≈4 chars per token)
+    # Fallback: rough estimate based on character length (approx 4 chars per token).
+    # This is a best-effort estimate — the eval prompt requests JSON-only responses
+    # without a ``usage`` field, so models will almost always reach this path.
     char_count = len(response)
     estimated_output = max(char_count // 4, 0)
     return {"input_tokens": 0, "output_tokens": estimated_output}
@@ -536,6 +555,8 @@ def main() -> int:
             f"Review cost_tracking in harness_state.json or increase limits in ahoy_config.json.",
             file=sys.stderr,
         )
+        result = _error_result(sprint_dir, models, "Cost limit exceeded")
+        write_result(sprint_dir, result)
         return 1
 
     # Read inputs
@@ -554,19 +575,7 @@ def main() -> int:
     try:
         code_snippets = collect_code_snippets(sprint_dir, project_root)
     except ValueError as exc:
-        result = {
-            "sprint": sprint_dir.name,
-            "evaluated_at": datetime.now(timezone.utc).isoformat(),
-            "models_used": models,
-            "models_valid": [],
-            "verdict": "error",
-            "model_verdicts": {},
-            "issues": [],
-            "passed_criteria": [],
-            "failed_criteria": [],
-            "error_reason": str(exc),
-            "status_action": "error",
-        }
+        result = _error_result(sprint_dir, models, str(exc))
         write_result(sprint_dir, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
@@ -608,19 +617,34 @@ def main() -> int:
 
     # --- Cost tracking: parse usage from each model response and update state ---
     total_tokens_this_run = 0
+    prompt_tokens_estimate = len(prompt) // 4
     for model_name, raw in raw_responses.items():
         usage = parse_usage(raw, parsed=verdicts.get(model_name))
-        total_tokens_this_run += usage["input_tokens"] + usage["output_tokens"]
-    # Also account for prompt tokens sent to each model (estimate)
-    prompt_tokens_estimate = len(prompt) // 4
-    total_tokens_this_run += prompt_tokens_estimate * len(models)
+        total_tokens_this_run += usage["output_tokens"]
+        if usage["input_tokens"] > 0:
+            # Model returned real usage data — use it directly
+            total_tokens_this_run += usage["input_tokens"]
+        else:
+            # No real input token data — use prompt-length estimate as fallback
+            total_tokens_this_run += prompt_tokens_estimate
+
+    # Read the current sprint's attempt number from harness_state.json
+    current_attempt = 0
+    try:
+        hs = json.loads(harness_state_path.read_text(encoding="utf-8"))
+        for sp in hs.get("sprints", []):
+            if sp.get("sprint_id") == sprint_dir.name:
+                current_attempt = sp.get("attempt", 0)
+                break
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        pass
 
     update_cost_tracking(
         harness_state_path,
         eval_calls=len(models),
         tokens=total_tokens_this_run,
         sprint_id=sprint_dir.name,
-        attempt=0,
+        attempt=current_attempt,
     )
 
     # Compute consensus
