@@ -242,8 +242,16 @@ def _error_json(model: str, error: str) -> str:
 def validate_objections(parsed: dict, model: str) -> dict:
     """Validate that the parsed response contains required objections.
 
-    If the objections field is missing or empty, override verdict to 'error'.
+    If the objections field is missing or empty, log a warning but preserve the
+    original verdict.  External LLMs may not reliably produce every requested
+    JSON field, so a missing objections list should not cascade into a total
+    evaluation failure.
     """
+    # If the model already errored (e.g. CLI timeout, JSON parse failure),
+    # preserve the original error information — skip objection validation.
+    if parsed.get("verdict") == "error":
+        return parsed
+
     raw = parsed.get("objections")
     # Normalise to a list of non-empty strings
     if isinstance(raw, list):
@@ -252,10 +260,10 @@ def validate_objections(parsed: dict, model: str) -> dict:
         parsed["objections"] = []
 
     if not parsed["objections"]:
-        parsed["verdict"] = "error"
-        parsed["error"] = (
-            f"{model}: objections field missing or empty. "
-            "All evaluators must provide at least one concrete concern or improvement."
+        print(
+            f"[eval_dispatch] WARNING: {model}: objections field missing or empty. "
+            "Evaluators should provide at least one concrete concern or improvement.",
+            file=sys.stderr,
         )
     return parsed
 
