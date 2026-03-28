@@ -110,11 +110,25 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 2. Identify issues from code quality, security, and performance perspectives
 3. Do not give lenient verdicts like "this is good enough"
 4. Do not trust claims in the Generator report — read and judge the code directly
+
+## Forced Objection
+- List at least one concern or improvement, even if minor.
+- Even if the implementation looks correct, you MUST provide at least one concrete suggestion for improvement (e.g., edge cases, naming, documentation, test coverage, error handling).
+- If you cannot find any issue, suggest a minor improvement anyway — no review is complete without at least one actionable objection.
+
+## Active Rejection
+- Do NOT default to PASS — justify your verdict with specific evidence.
+- A "pass" verdict requires explicit justification for why each acceptance criterion is met.
+- If in doubt, lean toward "partial_pass" or "fail" rather than "pass".
+
 5. Respond ONLY in the following JSON format (no text outside JSON):
 
 ```json
 {{
   "verdict": "pass or partial_pass or fail",
+  "objections": [
+    "at least one concrete concern or improvement suggestion (REQUIRED, minimum 1)"
+  ],
   "issues": [
     {{
       "id": "ISS-001",
@@ -223,6 +237,27 @@ def _error_json(model: str, error: str) -> str:
         "failed_criteria": [],
         "summary": f"{model} call failed",
     })
+
+
+def validate_objections(parsed: dict, model: str) -> dict:
+    """Validate that the parsed response contains required objections.
+
+    If the objections field is missing or empty, override verdict to 'error'.
+    """
+    raw = parsed.get("objections")
+    # Normalise to a list of non-empty strings
+    if isinstance(raw, list):
+        parsed["objections"] = [o for o in raw if isinstance(o, str) and o.strip()]
+    else:
+        parsed["objections"] = []
+
+    if not parsed["objections"]:
+        parsed["verdict"] = "error"
+        parsed["error"] = (
+            f"{model}: objections field missing or empty. "
+            "All evaluators must provide at least one concrete concern or improvement."
+        )
+    return parsed
 
 
 def extract_json(text: str) -> dict | None:
@@ -380,6 +415,13 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
             issue["found_by"] = model_name
             all_issues.append(issue)
 
+    # Merge objections from all valid models
+    all_objections: dict[str, list[str]] = {}
+    for model_name, result in valid.items():
+        model_objections = result.get("objections", [])
+        if model_objections:
+            all_objections[model_name] = model_objections
+
     # Merge failed criteria
     all_failed = set()
     all_passed = set()
@@ -393,6 +435,7 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
         "consensus_verdict": consensus,
         "model_verdicts": {k: v.get("verdict") for k, v in verdicts.items()},
         "issues": all_issues,
+        "objections": all_objections,
         "passed_criteria": sorted(all_passed),
         "failed_criteria": sorted(all_failed),
     }
@@ -474,6 +517,7 @@ def main() -> int:
         raw = call_model(model, prompt, timeout=args.timeout)
         parsed = extract_json(raw)
         if parsed:
+            parsed = validate_objections(parsed, model)
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
             return model, parsed
         print(f"[eval_dispatch] {model} raw output (first 500): {raw[:500]}", file=sys.stderr)
@@ -505,6 +549,7 @@ def main() -> int:
         "verdict": consensus["consensus_verdict"],
         "model_verdicts": consensus.get("model_verdicts", {}),
         "issues": consensus.get("issues", []),
+        "objections": consensus.get("objections", {}),
         "passed_criteria": consensus.get("passed_criteria", []),
         "failed_criteria": consensus.get("failed_criteria", []),
     }
