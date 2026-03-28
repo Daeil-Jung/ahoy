@@ -2,16 +2,18 @@
 """Harness state transition validation script.
 
 Called from Claude Code hooks to block harness rule violations.
+Supports extended verification: test_command, lint_command, type_check_command, and coverage_threshold.
 
 Usage: validate_harness.py <check_type>
   check_type:
+    scope-check      — Before Edit/Write: verify target file is within contract.md Implementation Scope
     pre-state-write  — Before writing harness_state.json: verify external evaluation exists before leaving generated
     post-state-write — After writing harness_state.json: verify status=passed <-> status_action consistency
     pre-gen          — Before Generator execution: verify contract.md exists
     post-eval        — After evaluation: verify external model verdict in issues.json
     guard-eval-files — Block direct writing of issues.json (only eval_dispatch.py allowed)
-    pre-commit       — Run tests before commit (only in harness mode)
-    pre-push         — Run tests + verify state consistency before push
+    pre-commit       — Run tests, lint, and type check before commit (only in harness mode)
+    pre-push         — Run tests, lint, type check + verify state consistency before push
 """
 
 import json
@@ -53,13 +55,123 @@ def get_current_status(state: dict) -> str:
     return ""
 
 
-def get_test_command() -> str:
+def _read_spec_content() -> str:
     spec_file = HARNESS_DIR / "spec.md"
     if not spec_file.exists():
         return ""
-    content = spec_file.read_text(encoding="utf-8")
+    return spec_file.read_text(encoding="utf-8")
+
+
+def _is_placeholder(value: str) -> bool:
+    return "{{" in value
+
+
+def get_test_command() -> str:
+    content = _read_spec_content()
+    if not content:
+        return ""
     match = re.search(r'test_command:\s*"([^"]+)"', content)
-    return match.group(1) if match else ""
+    if match and not _is_placeholder(match.group(1)):
+        return match.group(1)
+    return ""
+
+
+def get_lint_command() -> str:
+    content = _read_spec_content()
+    if not content:
+        return ""
+    match = re.search(r'lint_command:\s*"([^"]+)"', content)
+    if match and not _is_placeholder(match.group(1)):
+        return match.group(1)
+    return ""
+
+
+def get_type_check_command() -> str:
+    content = _read_spec_content()
+    if not content:
+        return ""
+    match = re.search(r'type_check_command:\s*"([^"]+)"', content)
+    if match and not _is_placeholder(match.group(1)):
+        return match.group(1)
+    return ""
+
+
+def get_coverage_threshold() -> int | None:
+    content = _read_spec_content()
+    if not content:
+        return None
+    match = re.search(r'coverage_threshold:\s*(\S+)', content)
+    if not match or _is_placeholder(match.group(1)):
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_coverage_percent(output: str) -> float | None:
+    """Extract coverage percentage from test output.
+
+    Looks for common patterns like:
+      - "Coverage: 85%"
+      - "85% coverage"
+      - "TOTAL ... 85%"
+      - "Total coverage: 85.3%"
+    """
+    patterns = [
+        r'(?:coverage|cov)[:\s]+(\d+(?:\.\d+)?)\s*%',
+        r'(\d+(?:\.\d+)?)\s*%\s*(?:coverage|cov)',
+        r'TOTAL\s+.*?(\d+(?:\.\d+)?)\s*%',
+        r'(\d+(?:\.\d+)?)\s*%',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, output, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _run_verification_command(label: str, cmd: str) -> None:
+    """Run a verification command and fail with a clear message if it fails."""
+    info(f"[HARNESS-GUARD] Running {label}: {cmd}")
+    result = subprocess.run(cmd, shell=True)
+    if result.returncode != 0:
+        fail(
+            f"\n[HARNESS-GUARD] Blocked: {label} failed — blocked\n"
+            f"[HARNESS-GUARD] Fix the {label} issues and try again."
+        )
+    info(f"[HARNESS-GUARD] Passed: {label} passed")
+
+
+def _run_tests_with_coverage(test_cmd: str, coverage_threshold: int | None) -> None:
+    """Run test command, optionally checking coverage threshold."""
+    info(f"[HARNESS-GUARD] Running tests: {test_cmd}")
+    result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True)
+    # Print output so it's visible
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+
+    if result.returncode != 0:
+        fail(
+            "\n[HARNESS-GUARD] Blocked: Tests failed — blocked\n"
+            "[HARNESS-GUARD] Fix the tests and try again."
+        )
+    info("[HARNESS-GUARD] Passed: Tests passed")
+
+    if coverage_threshold is not None:
+        combined_output = (result.stdout or "") + (result.stderr or "")
+        coverage = _parse_coverage_percent(combined_output)
+        if coverage is not None:
+            if coverage < coverage_threshold:
+                fail(
+                    f"\n[HARNESS-GUARD] Blocked: Coverage {coverage:.1f}% is below threshold {coverage_threshold}%\n"
+                    "[HARNESS-GUARD] Increase test coverage and try again."
+                )
+            info(f"[HARNESS-GUARD] Passed: Coverage {coverage:.1f}% meets threshold {coverage_threshold}%")
+        else:
+            info(f"[HARNESS-GUARD] Warning: Could not parse coverage from test output — skipping coverage check (threshold: {coverage_threshold}%)")
 
 
 def verify_issues_integrity(issues_file: Path) -> str:
@@ -246,31 +358,41 @@ def check_post_eval() -> None:
 
 
 def check_pre_commit() -> None:
-    """Run tests before commit (enforced only in harness mode)."""
+    """Run tests, lint, and type check before commit (enforced only in harness mode)."""
     test_cmd = get_test_command()
-    if not test_cmd:
-        return
+    lint_cmd = get_lint_command()
+    type_cmd = get_type_check_command()
+    threshold = get_coverage_threshold()
 
-    info(f"[HARNESS-GUARD] Running tests before commit: {test_cmd}")
-    result = subprocess.run(test_cmd, shell=True)
-    if result.returncode != 0:
-        fail(
-            "\n[HARNESS-GUARD] Blocked: Tests failed — commit blocked\n"
-            "[HARNESS-GUARD] Fix the tests and try committing again."
-        )
-    info("[HARNESS-GUARD] Passed: Tests passed — commit allowed")
+    if test_cmd:
+        _run_tests_with_coverage(test_cmd, threshold)
+
+    if lint_cmd:
+        _run_verification_command("lint", lint_cmd)
+
+    if type_cmd:
+        _run_verification_command("type check", type_cmd)
+
+    if test_cmd or lint_cmd or type_cmd:
+        info("[HARNESS-GUARD] Passed: All verification checks passed — commit allowed")
 
 
 def check_pre_push() -> None:
-    """Run tests + verify harness state consistency before push."""
-    # 1. Run tests
+    """Run tests, lint, type check + verify harness state consistency before push."""
+    # 1. Run tests, lint, type check
     test_cmd = get_test_command()
+    lint_cmd = get_lint_command()
+    type_cmd = get_type_check_command()
+    threshold = get_coverage_threshold()
+
     if test_cmd:
-        info(f"[HARNESS-GUARD] Running tests before push: {test_cmd}")
-        result = subprocess.run(test_cmd, shell=True)
-        if result.returncode != 0:
-            fail("\n[HARNESS-GUARD] Blocked: Tests failed — push blocked")
-        info("[HARNESS-GUARD] Passed: Tests passed")
+        _run_tests_with_coverage(test_cmd, threshold)
+
+    if lint_cmd:
+        _run_verification_command("lint", lint_cmd)
+
+    if type_cmd:
+        _run_verification_command("type check", type_cmd)
 
     # 2. Harness state consistency check
     state = load_state()
@@ -299,9 +421,131 @@ def check_pre_push() -> None:
     info("[HARNESS-GUARD] Passed: Harness state consistency confirmed — push allowed")
 
 
+def parse_scope_from_contract(contract_path: Path) -> tuple[list[str], list[str], list[str]]:
+    """Parse Implementation Scope from contract.md.
+
+    Returns (files_to_create, files_to_modify, files_to_preserve).
+    """
+    try:
+        content = contract_path.read_text(encoding="utf-8")
+    except OSError:
+        return [], [], []
+
+    create: list[str] = []
+    modify: list[str] = []
+    preserve: list[str] = []
+
+    current_section: list[str] | None = None
+    in_scope = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Detect top-level heading that ends the scope block
+        if in_scope and re.match(r"^##\s+", stripped) and "Implementation Scope" not in stripped:
+            break
+
+        if re.match(r"^##\s+Implementation Scope", stripped):
+            in_scope = True
+            continue
+
+        if not in_scope:
+            continue
+
+        if re.match(r"^###\s+Files to Create", stripped):
+            current_section = create
+            continue
+        elif re.match(r"^###\s+Files to Modify", stripped):
+            current_section = modify
+            continue
+        elif re.match(r"^###\s+Files to Preserve", stripped):
+            current_section = preserve
+            continue
+        elif re.match(r"^###\s+", stripped):
+            current_section = None
+            continue
+
+        if current_section is not None:
+            match = re.match(r"^[-*]\s+`?([^`\s]+)`?", stripped)
+            if match:
+                current_section.append(match.group(1))
+
+    return create, modify, preserve
+
+
+def check_scope() -> None:
+    """Verify target file is within contract.md Implementation Scope."""
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+
+    if not current_sprint:
+        return  # No active sprint, pass through
+
+    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
+    if not contract_path.exists():
+        return  # No contract yet, pass through
+
+    # Get the file path from CLAUDE_TOOL_INPUT
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return  # No tool input, pass through
+
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return  # Can't parse, pass through
+
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+
+    # Normalize to forward slashes for consistent comparison
+    file_path_normalized = file_path.replace("\\", "/")
+
+    # Always allow harness files
+    if ".claude/harness/" in file_path_normalized or ".claude/harness\\" in file_path:
+        return
+
+    # Parse the allowed scope
+    create, modify, preserve = parse_scope_from_contract(contract_path)
+
+    # Files to Preserve are explicitly blocked
+    for p in preserve:
+        p_normalized = p.replace("\\", "/")
+        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+            fail(
+                f"[HARNESS-GUARD] Blocked: '{file_path}' is listed in Files to Preserve\n"
+                "[HARNESS-GUARD] This file is protected by the sprint contract and must not be modified."
+            )
+
+    # Allowed files = create + modify
+    allowed = create + modify
+    if not allowed:
+        return  # No scope defined, pass through
+
+    for p in allowed:
+        p_normalized = p.replace("\\", "/")
+        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+            return  # File is in scope
+
+    # Check if file is part of the AHOY plugin itself — always allow
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    if plugin_root:
+        plugin_normalized = plugin_root.replace("\\", "/")
+        if file_path_normalized.startswith(plugin_normalized):
+            return
+
+    fail(
+        f"[HARNESS-GUARD] Blocked: '{file_path}' is outside the Implementation Scope\n"
+        f"[HARNESS-GUARD] Allowed files: {', '.join(allowed)}\n"
+        "[HARNESS-GUARD] Only create/modify files specified in the sprint contract."
+    )
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
+    "scope-check": check_scope,
     "pre-state-write": check_pre_state_write,
     "post-state-write": check_post_state_write,
     "pre-gen": check_pre_gen,
