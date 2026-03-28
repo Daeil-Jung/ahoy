@@ -19,6 +19,8 @@ build/
 *.egg
 .venv/
 venv/
+.coverage
+.pytest_cache/
 
 # Node
 node_modules/
