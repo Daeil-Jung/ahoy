@@ -470,8 +470,11 @@ def update_cost_tracking(
     state: dict = {}
     try:
         state = json.loads(harness_state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, FileNotFoundError):
-        pass
+    except FileNotFoundError:
+        pass  # First run — start fresh
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[eval_dispatch] WARNING: Failed to read harness_state.json for cost tracking: {exc}", file=sys.stderr)
+        return  # Do not write back — would clobber existing data
 
     tracking = state.setdefault("cost_tracking", {
         "total_eval_calls": 0,
@@ -563,6 +566,9 @@ def main() -> int:
     contract_path = sprint_dir / "contract.md"
     if not contract_path.exists():
         print(f"ERROR: {contract_path} not found", file=sys.stderr)
+        result = _error_result(sprint_dir, models, "contract.md not found")
+        write_result(sprint_dir, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
 
     contract = contract_path.read_text(encoding="utf-8")
