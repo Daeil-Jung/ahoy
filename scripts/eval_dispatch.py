@@ -399,18 +399,20 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
 
 
 def check_verdict_conflict(verdicts: dict[str, dict]) -> bool:
-    """Check if valid model verdicts conflict (mix of pass and fail).
+    """Check if valid model verdicts conflict (hard pass/fail disagreement).
 
-    Returns True if there is a conflict, False if unanimous.
+    Returns True only when some models say pass/partial_pass and others say fail.
     Models with verdict 'error' are excluded from the check.
+    Soft disagreements (pass vs partial_pass) do not count as conflicts.
     """
-    valid_verdicts = {
-        v.get("verdict")
-        for v in verdicts.values()
-        if v.get("verdict") not in ("error", None)
-    }
-    # Conflict means at least two different verdict values among valid models
-    return len(valid_verdicts) > 1
+    valid = {k: v for k, v in verdicts.items() if v.get("verdict") not in ("error", None)}
+    if len(valid) < 2:
+        return False
+    verdict_values = {v["verdict"] for v in valid.values()}
+    # Only conflict if there's a mix of fail and non-fail
+    has_fail = "fail" in verdict_values
+    has_non_fail = bool(verdict_values - {"fail"})
+    return has_fail and has_non_fail
 
 
 def build_round2_prompt(base_prompt: str, round1_verdicts: dict[str, dict]) -> str:
@@ -566,8 +568,12 @@ def main() -> int:
                 model_name, result = future.result()
                 round2_verdicts[model_name] = result
 
-        # Use round 2 verdicts for consensus
-        verdicts = round2_verdicts
+        # Use round 2 verdicts only if quorum is maintained
+        round2_valid = {k: v for k, v in round2_verdicts.items() if v.get("verdict") != "error"}
+        if len(round2_valid) >= args.min_models:
+            verdicts = round2_verdicts
+        else:
+            print(f"[eval_dispatch] Round 2 quorum lost ({len(round2_valid)} valid < {args.min_models} required), using round 1 results", file=sys.stderr)
     else:
         print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
 
