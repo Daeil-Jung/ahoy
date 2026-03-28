@@ -1,6 +1,10 @@
 {
   "name": "ahoy-marketplace",
   "description": "Marketplace for AHOY — Agent Harness for Orchestrated Yielding",
+  "owner": {
+    "name": "Daeil-Jung",
+    "url": "https://github.com/Daeil-Jung"
+  },
   "plugins": [
     {
       "name": "ahoy",
