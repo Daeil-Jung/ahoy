@@ -356,6 +356,19 @@ def check_circuit_breaker() -> None:
     idx = state.get("current_sprint_index", 0)
     sprint_obj = state["sprints"][idx]
     current_attempt = sprint_obj.get("attempt", 0)
+
+    # Archive current issues.json as issues.json.attempt-{N} before comparison.
+    # This makes the current attempt's issues available for the NEXT rework cycle.
+    issues_file = sprint_dir / "issues.json"
+    if issues_file.exists() and current_attempt >= 1:
+        backup_path = sprint_dir / f"issues.json.attempt-{current_attempt}"
+        if not backup_path.exists():
+            shutil.copy2(issues_file, backup_path)
+            print(
+                f"[validate_harness] Archived {issues_file.name} as {backup_path.name}",
+                file=sys.stderr,
+            )
+
     pattern = detect_failure_pattern(sprint_dir, current_attempt)
 
     # Output the pattern as structured JSON so the orchestrator can persist it
