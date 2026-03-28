@@ -579,24 +579,33 @@ def audit_final_scope() -> None:
         return  # No scope defined, pass through
 
     # Collect changed files via git diff against HEAD
-    result = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    staged = subprocess.run(
-        ["git", "diff", "--name-only", "--cached"],
-        capture_output=True,
-        text=True,
-    )
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        capture_output=True,
-        text=True,
-    )
+    git_commands = [
+        ("git diff", ["git", "diff", "--name-only", "HEAD"]),
+        ("git diff --cached", ["git", "diff", "--name-only", "--cached"]),
+        ("git ls-files", ["git", "ls-files", "--others", "--exclude-standard"]),
+    ]
+
+    outputs: list[str] = []
+    for label, cmd in git_commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as exc:
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label}: {exc}) "
+                "— cannot verify file changes, blocking transition"
+            )
+            return  # unreachable; helps static analysis see proc is always bound
+        if proc.returncode != 0:
+            stderr_hint = (proc.stderr or "").strip()[:200]
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label} exited {proc.returncode}"
+                f"{': ' + stderr_hint if stderr_hint else ''}) "
+                "— cannot verify file changes, blocking transition"
+            )
+        outputs.append(proc.stdout)
 
     changed_files: set[str] = set()
-    for output in (result.stdout, staged.stdout, untracked.stdout):
+    for output in outputs:
         for line in output.strip().splitlines():
             stripped = line.strip()
             if stripped:
