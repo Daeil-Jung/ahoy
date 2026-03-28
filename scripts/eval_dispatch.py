@@ -110,7 +110,8 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 2. Identify issues from code quality, security, and performance perspectives
 3. Do not give lenient verdicts like "this is good enough"
 4. Do not trust claims in the Generator report — read and judge the code directly
-5. Respond ONLY in the following JSON format (no text outside JSON):
+5. For each issue, provide a concrete `suggestion` field describing the specific direction for fixing the issue — which file, which section, and how to change it
+6. Respond ONLY in the following JSON format (no text outside JSON):
 
 ```json
 {{
@@ -122,7 +123,8 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
       "category": "functional or test or quality or performance",
       "description": "specific issue description",
       "acceptance_criterion": "AC-001",
-      "suggested_fix": "suggested fix direction"
+      "suggested_fix": "suggested fix direction",
+      "suggestion": "concrete fix direction — which file, which section, and how to change it"
     }}
   ],
   "passed_criteria": ["AC-001"],
