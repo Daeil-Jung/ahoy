@@ -270,28 +270,19 @@ def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
     The convention is ``issues.json.attempt-N`` for archived attempts, while
     ``issues.json`` always holds the *current* attempt.
 
-    Falls back to the current ``issues.json`` when no backup file exists
-    (e.g. for attempt 0 or when backups have not been created yet).
+    Returns an empty list when no backup file exists — falling back to the
+    current ``issues.json`` would cause self-comparison and false circuit
+    breaks.
     """
-    backup = sprint_dir / f"issues.json.attempt-{attempt}"
-    if backup.exists():
-        data = load_json(backup)
+    attempt_path = sprint_dir / f"issues.json.attempt-{attempt}"
+    if attempt_path.exists():
+        data = load_json(attempt_path)
         if data and isinstance(data.get("issues"), list):
             return data["issues"]
 
-    # Fallback: try loading the current issues.json for comparison
-    current = sprint_dir / "issues.json"
-    data = load_json(current)
-    if data and isinstance(data.get("issues"), list):
-        print(
-            f"[HARNESS-GUARD] Warning: issues.json.attempt-{attempt} not found, "
-            f"falling back to current issues.json",
-            file=sys.stderr,
-        )
-        return data["issues"]
-
     print(
-        f"[HARNESS-GUARD] Warning: No issues data found for attempt {attempt}",
+        f"[validate_harness] No previous attempt issues found at {attempt_path}, "
+        f"skipping circuit breaker comparison",
         file=sys.stderr,
     )
     return []
