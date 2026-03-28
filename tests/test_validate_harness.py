@@ -564,3 +564,217 @@ def test_main_dispatches_known_check(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     validate_harness.main()
 
     assert called == ["scope"]
+
+
+# ── v0.2.0 gap-fill tests ───────────────────────────────────────
+
+
+def test_audit_final_scope_allows_harness_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    write_contract(tmp_path, "## Implementation Scope\n### Files to Modify\n- `scripts/eval_dispatch.py`")
+
+    class Result:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = iter([
+        Result(0, "ok"),                                     # git rev-parse HEAD
+        Result(0, ".claude/harness/harness_state.json\n"),   # git diff HEAD
+        Result(0, ""),                                       # git diff --cached
+    ])
+    monkeypatch.setattr(validate_harness.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    validate_harness.audit_final_scope()  # Should not raise
+
+
+def test_audit_final_scope_blocks_preserved_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    write_contract(
+        tmp_path,
+        "## Implementation Scope\n### Files to Modify\n- `scripts/eval_dispatch.py`\n### Files to Preserve\n- `README.md`",
+    )
+
+    class Result:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = iter([
+        Result(0, "ok"),                     # git rev-parse HEAD
+        Result(0, "README.md\n"),            # git diff HEAD
+        Result(0, ""),                       # git diff --cached
+    ])
+    monkeypatch.setattr(validate_harness.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    with pytest.raises(SystemExit):
+        validate_harness.audit_final_scope()
+
+
+def test_audit_final_scope_skips_unborn_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    write_contract(tmp_path, "## Implementation Scope\n### Files to Modify\n- `scripts/eval_dispatch.py`")
+
+    class Result:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    monkeypatch.setattr(
+        validate_harness.subprocess, "run",
+        lambda *args, **kwargs: Result(128, stderr="fatal: Needed a single revision"),
+    )
+
+    validate_harness.audit_final_scope()  # Should not raise
+
+
+def test_detect_failure_pattern_skips_first_attempt(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    result = validate_harness.detect_failure_pattern(sprint_dir, 1)
+
+    assert result["circuit_break"] is False
+
+
+def test_detect_failure_pattern_no_previous_file(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "issues.json").write_text(
+        json.dumps({"issues": [{"category": "functional", "description": "bug"}]}),
+        encoding="utf-8",
+    )
+
+    result = validate_harness.detect_failure_pattern(sprint_dir, 2)
+
+    assert result["circuit_break"] is False
+
+
+def test_detect_failure_pattern_no_issues_key(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "issues.json").write_text('{"verdict": "pass"}', encoding="utf-8")
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"category": "functional", "description": "bug"}]}),
+        encoding="utf-8",
+    )
+
+    result = validate_harness.detect_failure_pattern(sprint_dir, 2)
+
+    assert result["circuit_break"] is False
+
+
+def test_post_edit_quality_detects_stub_pass(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "scripts/example.py", "content": "def foo():\n    pass\n"}),
+    )
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_edit_quality()
+
+
+def test_post_edit_quality_detects_ellipsis(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "scripts/example.py", "content": "def foo():\n    ...\n"}),
+    )
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_edit_quality()
+
+
+def test_post_edit_quality_detects_not_implemented(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "scripts/example.py", "content": "def foo():\n    raise NotImplementedError\n"}),
+    )
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_edit_quality()
+
+
+def test_post_edit_quality_uses_new_string_from_edit(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "scripts/example.py", "new_string": "TODO: implement this\n"}),
+    )
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_edit_quality()
+
+
+def test_post_edit_quality_skips_binary_extension(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "image.png", "content": "TODO: this should not be detected"}),
+    )
+
+    validate_harness.check_post_edit_quality()  # Should not raise
+
+
+def test_check_pre_push_runs_all_and_checks_consistent_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "spec.md").write_text(
+        '\n'.join([
+            'test_command: "uv run pytest"',
+            'lint_command: "uv run ruff check ."',
+            'type_check_command: "uv run mypy scripts"',
+            "coverage_threshold: 80",
+        ]),
+        encoding="utf-8",
+    )
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps({
+            "current_sprint_index": 0,
+            "sprints": [{"sprint_id": "sprint-001", "status": "passed"}],
+        }),
+        encoding="utf-8",
+    )
+    write_issues(tmp_path, issue_payload(verdict="pass", status_action="passed"))
+
+    called: list[tuple] = []
+    monkeypatch.setattr(
+        validate_harness, "_run_tests_with_coverage",
+        lambda command, threshold: called.append(("test", command, threshold)),
+    )
+    monkeypatch.setattr(
+        validate_harness, "_run_verification_command",
+        lambda label, command: called.append((label, command)),
+    )
+
+    validate_harness.check_pre_push()
+
+    assert ("test", "uv run pytest", 80) in called
+    assert ("lint", "uv run ruff check .") in called
+    assert ("type check", "uv run mypy scripts") in called
+
+
+def test_hooks_json_covers_all_expected_check_types():
+    hooks = json.loads(
+        (Path(__file__).resolve().parents[1] / "hooks" / "hooks.json").read_text(encoding="utf-8")
+    )
+    commands = []
+    for stage in hooks["hooks"].values():
+        for matcher in stage:
+            for hook in matcher["hooks"]:
+                if hook["type"] == "command":
+                    commands.append(hook["command"])
+
+    combined = " ".join(commands)
+    expected_checks = [
+        "scope-check", "pre-state-write", "post-state-write",
+        "pre-gen", "post-eval", "guard-eval-files",
+        "audit-final-scope", "pre-commit", "pre-push",
+        "post-edit-quality", "circuit-breaker",
+    ]
+    for check in expected_checks:
+        assert check in combined, f"Missing hook check: {check}"

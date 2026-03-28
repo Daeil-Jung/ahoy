@@ -527,3 +527,218 @@ def test_main_uses_round2_when_round1_has_conflict(monkeypatch: pytest.MonkeyPat
     assert payload["evaluation_rounds"] == 2
     assert payload["round2_verdicts"] == {"codex": "partial_pass", "claude": "partial_pass"}
     assert payload["convergence_ratio"] == 1.0
+
+
+# ── v0.2.0 gap-fill tests ───────────────────────────────────────
+
+
+def test_strip_generator_opinions_keeps_numeric_test_results_with_units():
+    report = "\n".join(
+        [
+            "12 tests passed",
+            "3 cases completed successfully",
+            "+10 / -5 lines changed",
+        ]
+    )
+
+    sanitized = eval_dispatch.strip_generator_opinions(report)
+
+    assert "12 tests passed" in sanitized
+    assert "3 cases completed" in sanitized
+    assert "+10 / -5" in sanitized
+
+
+def test_call_model_returns_error_on_timeout(monkeypatch: pytest.MonkeyPatch):
+    import subprocess as sp
+
+    def raising_run(*args, **kwargs):
+        raise sp.TimeoutExpired(cmd="gemini", timeout=10)
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", raising_run)
+
+    response = json.loads(eval_dispatch.call_model("gemini", "prompt", timeout=10))
+    assert response["verdict"] == "error"
+    assert "timeout" in response["error"].lower()
+
+
+def test_call_model_returns_error_on_generic_exception(monkeypatch: pytest.MonkeyPatch):
+    def raising_run(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", raising_run)
+
+    response = json.loads(eval_dispatch.call_model("claude", "prompt"))
+    assert response["verdict"] == "error"
+    assert "RuntimeError" in response["error"]
+
+
+def test_validate_objections_skips_error_verdicts():
+    parsed = {"verdict": "error", "error": "CLI failed"}
+
+    validated = eval_dispatch.validate_objections(parsed, "codex")
+
+    assert validated == parsed
+
+
+def test_merge_criteria_results_full_pass_ratio():
+    merged, ratio = eval_dispatch._merge_criteria_results(
+        {
+            "codex": {
+                "criteria_results": [
+                    {"criterion_id": "AC-1", "description": "first", "verdict": "pass", "evidence": "ok"},
+                    {"criterion_id": "AC-2", "description": "second", "verdict": "pass", "evidence": "ok"},
+                ]
+            },
+            "claude": {
+                "criteria_results": [
+                    {"criterion_id": "AC-1", "description": "first", "verdict": "pass", "evidence": "ok"},
+                    {"criterion_id": "AC-2", "description": "second", "verdict": "pass", "evidence": "ok"},
+                ]
+            },
+        },
+        known_criteria=[{"id": "AC-1", "description": "first"}, {"id": "AC-2", "description": "second"}],
+    )
+
+    assert ratio == 1.0
+    assert all(item["verdict"] == "pass" for item in merged)
+
+
+def test_merge_criteria_results_empty_criteria():
+    merged, ratio = eval_dispatch._merge_criteria_results(
+        {"codex": {}, "claude": {}},
+        known_criteria=[],
+    )
+
+    assert merged == []
+    assert ratio == 0.0
+
+
+def test_record_convergence_skips_missing_sprint(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-999"
+    sprint_dir.mkdir(parents=True)
+    state_file = project_root / ".claude" / "harness" / "harness_state.json"
+    state_file.write_text(
+        json.dumps({"sprints": [{"sprint_id": "sprint-001", "attempt": 1}]}),
+        encoding="utf-8",
+    )
+
+    eval_dispatch._record_convergence(sprint_dir, project_root, 0.5)
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert "convergence_history" not in payload["sprints"][0]
+
+
+def test_compute_consensus_preserves_suggestion_field():
+    verdicts = {
+        "codex": {
+            "verdict": "partial_pass",
+            "issues": [{"id": "ISS-1", "severity": "minor", "suggestion": "fix line 42"}],
+            "passed_criteria": ["AC-001"],
+            "failed_criteria": [],
+        },
+        "claude": {
+            "verdict": "partial_pass",
+            "issues": [{"id": "ISS-2", "severity": "minor", "suggestion": "refactor method"}],
+            "passed_criteria": ["AC-001"],
+            "failed_criteria": [],
+        },
+    }
+
+    consensus = eval_dispatch.compute_consensus(verdicts, min_valid_models=2)
+
+    suggestions = [issue["suggestion"] for issue in consensus["issues"] if "suggestion" in issue]
+    assert "fix line 42" in suggestions
+    assert "refactor method" in suggestions
+
+
+def test_compute_consensus_merges_objections_from_all_models():
+    verdicts = {
+        "codex": {
+            "verdict": "pass",
+            "issues": [],
+            "objections": ["improve logging"],
+            "passed_criteria": [],
+            "failed_criteria": [],
+        },
+        "claude": {
+            "verdict": "pass",
+            "issues": [],
+            "objections": ["add error handling"],
+            "passed_criteria": [],
+            "failed_criteria": [],
+        },
+    }
+
+    consensus = eval_dispatch.compute_consensus(verdicts, min_valid_models=2)
+
+    assert "codex" in consensus["objections"]
+    assert "claude" in consensus["objections"]
+    assert consensus["objections"]["codex"] == ["improve logging"]
+    assert consensus["objections"]["claude"] == ["add error handling"]
+
+
+def test_warn_if_missing_reasoning_chain_logs_warnings(capsys: pytest.CaptureFixture[str]):
+    eval_dispatch._warn_if_missing_reasoning_chain("codex", {"verdict": "pass"})
+    assert "missing reasoning_chain" in capsys.readouterr().err
+
+    eval_dispatch._warn_if_missing_reasoning_chain("codex", {"verdict": "pass", "reasoning_chain": "not-a-dict"})
+    assert "not a dict" in capsys.readouterr().err
+
+    eval_dispatch._warn_if_missing_reasoning_chain(
+        "codex", {"verdict": "pass", "reasoning_chain": {"code_understanding": "a"}}
+    )
+    assert "incomplete" in capsys.readouterr().err
+
+
+def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("## Acceptance Criteria\n- AC-1: works", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `scripts/example.py`\n", encoding="utf-8")
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+    harness_dir = project_root / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps({"sprints": [{"sprint_id": "sprint-001", "attempt": 1}]}),
+        encoding="utf-8",
+    )
+
+    call_count = {"total": 0}
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        call_count["total"] += 1
+        if "Round 2" not in prompt:
+            # Round 1: conflict
+            verdict = "fail" if model == "codex" else "pass"
+        else:
+            # Round 2: codex errors out -> quorum lost
+            if model == "codex":
+                return json.dumps({"verdict": "error", "error": "timeout"})
+            verdict = "pass"
+        return json.dumps({
+            "verdict": verdict,
+            "objections": ["nit"],
+            "criteria_results": [{"criterion_id": "AC-1", "description": "works", "verdict": "pass", "evidence": "ok"}],
+            "issues": [{"id": "ISS-1", "severity": "minor", "description": "nit"}] if verdict == "fail" else [],
+            "passed_criteria": ["AC-1"] if verdict == "pass" else [],
+            "failed_criteria": ["AC-1"] if verdict == "fail" else [],
+            "summary": f"{model} verdict",
+        })
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch.sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    exit_code = eval_dispatch.main()
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+
+    assert payload["evaluation_rounds"] == 2
+    # Round 2 quorum lost -> falls back to round 1, which had a fail -> final fail
+    assert payload["verdict"] == "fail"
+    assert exit_code == 1
