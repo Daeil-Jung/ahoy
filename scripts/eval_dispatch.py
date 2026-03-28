@@ -109,6 +109,9 @@ def parse_acceptance_criteria(contract: str) -> list[dict[str, str]]:
     idx = 0
     for line in match.group("body").splitlines():
         stripped = line.strip()
+        # Skip indented sub-bullets (lines starting with whitespace before - or *)
+        if re.match(r"^\s+[-*]\s+", line):
+            continue
         # Match '- [ ] ...' or '- [x] ...' or '- ...' (but not sub-items or empty)
         ac_match = re.match(r"^[-*]\s+(?:\[[ x]]\s+)?(.+)$", stripped, re.IGNORECASE)
         if ac_match:
@@ -391,10 +394,12 @@ def write_result(sprint_dir: Path, result: dict) -> None:
 
 def _merge_criteria_results(
     valid_verdicts: dict[str, dict],
+    known_criteria: list[dict[str, str]] | None = None,
 ) -> tuple[list[dict], float]:
     """Merge per-criterion results across models and compute convergence_ratio.
 
     A criterion is considered passed only if ALL valid models marked it as pass.
+    If a model omits a criterion entirely, it is treated as fail for that model.
     Returns (merged_criteria_results, convergence_ratio).
     If no model provided criteria_results, returns ([], 0.0).
     """
@@ -408,8 +413,22 @@ def _merge_criteria_results(
     if not per_model:
         return [], 0.0
 
-    # Build a unified set of criterion IDs
+    model_names = list(per_model.keys())
+
+    # Build a unified set of criterion IDs, seeded from known_criteria if available
     all_criteria: dict[str, dict] = {}  # id -> merged result
+
+    if known_criteria:
+        for kc in known_criteria:
+            cid = kc["id"]
+            all_criteria[cid] = {
+                "criterion_id": cid,
+                "description": kc.get("description", ""),
+                "verdict": "pass",
+                "model_verdicts": {},
+                "evidence": [],
+            }
+
     for model_name, cr_list in per_model.items():
         for cr in cr_list:
             cid = cr.get("criterion_id", "")
@@ -435,6 +454,14 @@ def _merge_criteria_results(
     if not all_criteria:
         return [], 0.0
 
+    # Treat missing criteria as fail: if a model did not report a criterion, mark it as fail
+    for cid, entry in all_criteria.items():
+        for model_name in model_names:
+            if model_name not in entry["model_verdicts"]:
+                entry["model_verdicts"][model_name] = "fail"
+                entry["verdict"] = "fail"
+                entry["evidence"].append(f"[{model_name}] criterion not reported — treated as fail")
+
     # Build final list sorted by criterion ID (natural order: AC-1, AC-2, ..., AC-10)
     def _ac_sort_key(cid: str) -> tuple[str, int]:
         m = re.match(r"^(.*?)(\d+)$", cid)
@@ -458,7 +485,11 @@ def _merge_criteria_results(
     return merged, ratio
 
 
-def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> dict:
+def compute_consensus(
+    verdicts: dict[str, dict],
+    min_valid_models: int = 2,
+    known_criteria: list[dict[str, str]] | None = None,
+) -> dict:
     """Compute consensus from multiple model verdicts.
 
     Rules:
@@ -512,7 +543,7 @@ def compute_consensus(verdicts: dict[str, dict], min_valid_models: int = 2) -> d
     all_passed -= all_failed
 
     # Merge per-criterion results across models
-    criteria_results, convergence_ratio = _merge_criteria_results(valid)
+    criteria_results, convergence_ratio = _merge_criteria_results(valid, known_criteria)
 
     result = {
         "consensus_verdict": consensus,
@@ -576,6 +607,7 @@ def _record_convergence(
         return
 
     try:
+        # Subprocess write — bypasses hook enforcement by design (same as write_result for issues.json)
         harness_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8",
         )
@@ -669,8 +701,9 @@ def main() -> int:
             model_name, result = future.result()
             verdicts[model_name] = result
 
-    # Compute consensus
-    consensus = compute_consensus(verdicts, min_valid_models=args.min_models)
+    # Compute consensus (pass known criteria from contract for missing-criterion detection)
+    known_criteria = parse_acceptance_criteria(contract)
+    consensus = compute_consensus(verdicts, min_valid_models=args.min_models, known_criteria=known_criteria)
 
     # Build result JSON
     result = {
