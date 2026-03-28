@@ -6,15 +6,17 @@ Supports extended verification: test_command, lint_command, type_check_command, 
 
 Usage: validate_harness.py <check_type>
   check_type:
-    scope-check      — Before Edit/Write: verify target file is within contract.md Implementation Scope
-    pre-state-write  — Before writing harness_state.json: verify external evaluation exists before leaving generated
-    post-state-write — After writing harness_state.json: verify status=passed <-> status_action consistency
-    pre-gen          — Before Generator execution: verify contract.md exists
-    post-eval        — After evaluation: verify external model verdict in issues.json
-    guard-eval-files — Block direct writing of issues.json (only eval_dispatch.py allowed)
-    pre-commit       — Run tests, lint, and type check before commit (only in harness mode)
-    pre-push         — Run tests, lint, type check + verify state consistency before push
+    scope-check       — Before Edit/Write: verify target file is within contract.md Implementation Scope
+    pre-state-write   — Before writing harness_state.json: verify external evaluation exists before leaving generated
+    post-state-write  — After writing harness_state.json: verify status=passed <-> status_action consistency
+    pre-gen           — Before Generator execution: verify contract.md exists
+    post-eval         — After evaluation: verify external model verdict in issues.json
+    guard-eval-files  — Block direct writing of issues.json (only eval_dispatch.py allowed)
+    audit-final-scope — Before generated transition: verify all modified files are within contract scope
+    pre-commit        — Run tests, lint, and type check before commit (only in harness mode)
+    pre-push          — Run tests, lint, type check + verify state consistency before push
 """
+from __future__ import annotations
 
 import json
 import os
@@ -421,6 +423,18 @@ def check_pre_push() -> None:
     info("[HARNESS-GUARD] Passed: Harness state consistency confirmed — push allowed")
 
 
+def _path_matches_scope_entry(file_path: str, scope_entry: str) -> bool:
+    """Check whether *file_path* matches a single scope entry.
+
+    Both values must already be forward-slash normalised.
+    """
+    return (
+        file_path == scope_entry
+        or file_path.endswith("/" + scope_entry)
+        or scope_entry in file_path
+    )
+
+
 def parse_scope_from_contract(contract_path: Path) -> tuple[list[str], list[str], list[str]]:
     """Parse Implementation Scope from contract.md.
 
@@ -511,8 +525,7 @@ def check_scope() -> None:
 
     # Files to Preserve are explicitly blocked
     for p in preserve:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             fail(
                 f"[HARNESS-GUARD] Blocked: '{file_path}' is listed in Files to Preserve\n"
                 "[HARNESS-GUARD] This file is protected by the sprint contract and must not be modified."
@@ -524,8 +537,7 @@ def check_scope() -> None:
         return  # No scope defined, pass through
 
     for p in allowed:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             return  # File is in scope
 
     # Check if file is part of the AHOY plugin itself — always allow
@@ -542,6 +554,71 @@ def check_scope() -> None:
     )
 
 
+def audit_final_scope() -> None:
+    """Audit all modified files against contract scope before generated transition.
+
+    Complements check_scope() (per-file Edit/Write guard) by scanning the full
+    git diff at state-transition time so nothing slips through.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+
+    if not current_sprint:
+        return  # No active sprint
+
+    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
+    if not contract_path.exists():
+        return  # No contract yet
+
+    create, modify, _preserve = parse_scope_from_contract(contract_path)
+    allowed = create + modify
+    if not allowed:
+        return  # No scope defined, pass through
+
+    # Collect changed files via git diff against HEAD
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    staged = subprocess.run(
+        ["git", "diff", "--name-only", "--cached"],
+        capture_output=True,
+        text=True,
+    )
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True,
+        text=True,
+    )
+
+    changed_files: set[str] = set()
+    for output in (result.stdout, staged.stdout, untracked.stdout):
+        for line in output.strip().splitlines():
+            stripped = line.strip()
+            if stripped:
+                changed_files.add(stripped.replace("\\", "/"))
+
+    # Filter out harness-internal files — always allowed
+    out_of_scope: list[str] = []
+    for f in sorted(changed_files):
+        if f.startswith(".claude/harness/"):
+            continue
+
+        if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed):
+            out_of_scope.append(f)
+
+    if out_of_scope:
+        fail(
+            "[HARNESS-GUARD] Blocked: Intent-Action mismatch — files outside contract scope were modified:\n"
+            + "\n".join(f"  - {f}" for f in out_of_scope)
+            + f"\n[HARNESS-GUARD] Allowed scope: {', '.join(allowed)}\n"
+            "[HARNESS-GUARD] Revert out-of-scope changes or update the contract before transitioning to generated."
+        )
+
+    info("[HARNESS-GUARD] Passed: All modified files are within contract scope")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
@@ -551,6 +628,7 @@ CHECKS = {
     "pre-gen": check_pre_gen,
     "post-eval": check_post_eval,
     "guard-eval-files": check_guard_eval_files,
+    "audit-final-scope": audit_final_scope,
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
 }
