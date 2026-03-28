@@ -115,8 +115,17 @@ def parse_acceptance_criteria(contract: str) -> list[dict[str, str]]:
         # Match '- [ ] ...' or '- [x] ...' or '- ...' (but not sub-items or empty)
         ac_match = re.match(r"^[-*]\s+(?:\[[ x]]\s+)?(.+)$", stripped, re.IGNORECASE)
         if ac_match:
-            idx += 1
-            criteria.append({"id": f"AC-{idx}", "description": ac_match.group(1).strip()})
+            text = ac_match.group(1).strip()
+            # Extract explicit AC ID from the text (e.g., "AC-001: description" or "**AC-001** description")
+            id_match = re.match(r"\*{0,2}(AC-\d+)\*{0,2}[:\s\-–—]+(.+)", text, re.IGNORECASE)
+            if id_match:
+                ac_id = id_match.group(1).upper()
+                description = id_match.group(2).strip()
+            else:
+                idx += 1
+                ac_id = f"AC-{idx}"
+                description = text
+            criteria.append({"id": ac_id, "description": description})
 
     return criteria
 
@@ -400,9 +409,13 @@ def _merge_criteria_results(
 
     A criterion is considered passed only if ALL valid models marked it as pass.
     If a model omits a criterion entirely, it is treated as fail for that model.
+    The denominator for convergence_ratio is the total number of valid (non-error)
+    models, not just those that reported criteria_results.
     Returns (merged_criteria_results, convergence_ratio).
     If no model provided criteria_results, returns ([], 0.0).
     """
+    all_valid_model_names = list(valid_verdicts.keys())
+
     # Collect criteria_results from each model
     per_model: dict[str, list[dict]] = {}
     for model_name, result in valid_verdicts.items():
@@ -413,7 +426,7 @@ def _merge_criteria_results(
     if not per_model:
         return [], 0.0
 
-    model_names = list(per_model.keys())
+    model_names = all_valid_model_names
 
     # Build a unified set of criterion IDs, seeded from known_criteria if available
     all_criteria: dict[str, dict] = {}  # id -> merged result
