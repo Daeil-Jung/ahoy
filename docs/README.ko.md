@@ -44,7 +44,7 @@ AHOY는 **Claude Code 플러그인**입니다. 2단계로 설치합니다:
 
 ```bash
 # 1. 마켓플레이스 추가 & 설치
-/plugin marketplace add mullung2/ahoy
+/plugin marketplace add Daeil-Jung/ahoy
 /plugin install ahoy
 
 # 2. 환경 점검

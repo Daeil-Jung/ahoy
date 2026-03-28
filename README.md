@@ -44,7 +44,7 @@ AHOY is a **Claude Code plugin**. Install it in 2 steps:
 
 ```bash
 # 1. Add the marketplace & install
-/plugin marketplace add mullung2/ahoy
+/plugin marketplace add Daeil-Jung/ahoy
 /plugin install ahoy
 
 # 2. Verify your environment
@@ -313,24 +313,6 @@ ahoy/
 
 ---
 
-## Roadmap
-
-- [ ] Web UI dashboard — real-time sprint progress monitoring
-- [ ] Evaluator plugin system — direct API calls alongside CLI
-- [ ] Evaluation history analytics — model agreement rates, issue pattern trends
-- [ ] CI/CD integration — run AHOY loops in GitHub Actions
-- [ ] Multi-agent Generator — multiple models implement, best output selected
-
----
-
 ## License
 
 MIT
-
----
-
-<div align="center">
-
-**AHOY!** — *The shout when good code is spotted.*
-
-</div>
