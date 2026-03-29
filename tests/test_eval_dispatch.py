@@ -1054,3 +1054,52 @@ def test_result_includes_model_perspectives(monkeypatch: pytest.MonkeyPatch, tmp
         "codex": "accuracy_coverage",
         "gemini": "security_edge",
     }
+
+
+# ── v0.3.0 issue priority P0-P3 tests ────────────────────────────────────────
+
+
+def test_normalize_issue_priority_from_severity():
+    issue = {"severity": "blocker"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["priority"] == "P0"
+    assert result["severity"] == "blocker"
+
+
+def test_normalize_issue_priority_from_priority():
+    issue = {"priority": "P1"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["severity"] == "critical"
+    assert result["priority"] == "P1"
+
+
+def test_normalize_issue_priority_both_present():
+    issue = {"severity": "minor", "priority": "P0"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["severity"] == "minor"
+    assert result["priority"] == "P0"
+
+
+def test_normalize_issue_priority_neither_present():
+    issue = {"description": "some issue"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["priority"] == "P2"
+    assert result["severity"] == "major"
+
+
+def test_has_blocker_or_major_with_p0():
+    assert eval_dispatch.has_blocker_or_major([{"priority": "P0"}])
+
+
+def test_has_blocker_or_major_with_p3_only():
+    assert not eval_dispatch.has_blocker_or_major([{"priority": "P3"}])
+
+
+def test_build_eval_prompt_includes_priority_guide():
+    prompt = eval_dispatch.build_eval_prompt(
+        "AC-001",
+        "Implementation completed successfully.",
+        "### file.py\n```py\npass\n```",
+    )
+    assert "P0" in prompt
+    assert "Priority Guide" in prompt

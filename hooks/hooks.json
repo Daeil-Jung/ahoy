@@ -64,6 +64,15 @@
         ]
       },
       {
+        "matcher": "Write(*gen_report*)|Edit(*gen_report*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python \"${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py\" anti-rationalization"
+          }
+        ]
+      },
+      {
         "matcher": "Write(*issues.json*)|Edit(*issues.json*)",
         "hooks": [
           {
