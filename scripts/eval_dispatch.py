@@ -54,6 +54,26 @@ PERSPECTIVES: dict[str, dict[str, str]] = {
     },
 }
 
+_SEVERITY_TO_PRIORITY = {
+    "blocker": "P0",
+    "critical": "P1",
+    "major": "P2",
+    "minor": "P3",
+}
+
+_PRIORITY_TO_SEVERITY = {v: k for k, v in _SEVERITY_TO_PRIORITY.items()}
+
+
+def normalize_issue_priority(issue: dict) -> dict:
+    """Ensure each issue has both severity and priority fields."""
+    if "priority" not in issue and "severity" in issue:
+        issue["priority"] = _SEVERITY_TO_PRIORITY.get(issue["severity"], "P2")
+    elif "severity" not in issue and "priority" in issue:
+        issue["severity"] = _PRIORITY_TO_SEVERITY.get(issue["priority"], "major")
+    elif "priority" not in issue and "severity" not in issue:
+        issue["priority"] = "P2"
+        issue["severity"] = "major"
+    return issue
 
 def strip_generator_opinions(gen_report: str) -> str:
     """Remove Generator's self-assessment/opinions from gen_report.md, keeping only factual information.
@@ -267,6 +287,7 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
     {{
       "id": "ISS-001",
       "severity": "blocker or major or minor",
+      "priority": "P0 or P1 or P2 or P3",
       "category": "functional or test or quality or performance",
       "description": "specific issue description",
       "acceptance_criterion": "AC-001",
@@ -278,7 +299,13 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
   "failed_criteria": ["AC-002"],
   "summary": "one-line overall evaluation summary"
 }}
-```"""
+```
+
+Priority Guide:
+- P0 (blocker): Prevents core functionality. Must fix immediately.
+- P1 (critical): Serious bug or security issue. Must fix in this cycle.
+- P2 (major): Significant quality/correctness issue. Should fix.
+- P3 (minor): Nit, style, minor improvement. Fix if time permits."""
 
 
 def _build_cmd_string(cmd: list[str]) -> str:
@@ -495,7 +522,11 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
 
 
 def has_blocker_or_major(issues: list[dict]) -> bool:
-    return any(issue.get("severity") in {"blocker", "major"} for issue in issues)
+    return any(
+        issue.get("severity") in {"blocker", "major"}
+        or issue.get("priority") in {"P0", "P1"}
+        for issue in issues
+    )
 
 
 def derive_status_action(verdict: str, issues: list[dict]) -> str:
@@ -684,6 +715,7 @@ def compute_consensus(
     for model_name, result in valid.items():
         for issue in result.get("issues", []):
             issue["found_by"] = model_name
+            normalize_issue_priority(issue)
             all_issues.append(issue)
 
     # Merge objections from all valid models
