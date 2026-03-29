@@ -957,15 +957,15 @@ def test_build_avoidance_summary_reads_per_attempt_archives(tmp_path: Path):
     sprint_dir.mkdir()
 
     (sprint_dir / "gen_report.md.attempt-1").write_text(
-        "# Report\nApproach: used retry logic\nFiles modified: a.py",
+        "## Implementation Summary\nUsed retry logic\n## Other\n",
         encoding="utf-8",
     )
-    (sprint_dir / "gen_report.md.attempt-2").write_text(
-        "# Report\nApproach: used caching\nFiles modified: b.py",
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"description": "too slow", "severity": "blocker"}]}),
         encoding="utf-8",
     )
     (sprint_dir / "gen_report.md").write_text(
-        "# Report\nApproach: complete rewrite\nFiles modified: c.py",
+        "## Implementation Summary\nUsed complete rewrite\n## Other\n",
         encoding="utf-8",
     )
 
@@ -973,9 +973,7 @@ def test_build_avoidance_summary_reads_per_attempt_archives(tmp_path: Path):
 
     assert "Attempt 1" in summary
     assert "retry logic" in summary
-    assert "Attempt 2" in summary
-    assert "caching" in summary
-    assert "Previous Attempt Approaches" in summary
+    assert "Avoidance Patterns" in summary
 
 
 def test_build_avoidance_summary_falls_back_to_current_gen_report(tmp_path: Path):
@@ -984,23 +982,106 @@ def test_build_avoidance_summary_falls_back_to_current_gen_report(tmp_path: Path
     sprint_dir.mkdir()
 
     (sprint_dir / "gen_report.md").write_text(
-        "# Report\nApproach: initial attempt",
+        "## Implementation Summary\nInitial attempt approach\n## Other\n",
+        encoding="utf-8",
+    )
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"description": "test failure", "severity": "major"}]}),
         encoding="utf-8",
     )
 
-    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=1)
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=2)
 
     assert "Attempt 1" in summary
-    assert "initial attempt" in summary
+    assert "Initial attempt approach" in summary
 
 
 def test_build_avoidance_summary_returns_empty_for_first_attempt(tmp_path: Path):
-    """No avoidance summary needed on the first attempt (attempt=0)."""
+    """No avoidance summary needed on the first attempt."""
     sprint_dir = tmp_path / "sprint-001"
     sprint_dir.mkdir()
 
     summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=0)
     assert summary == ""
+
+
+def test_build_avoidance_summary_attempt_1_returns_empty(tmp_path: Path):
+    assert eval_dispatch.build_avoidance_summary(tmp_path, 1) == ""
+
+
+def test_build_avoidance_summary_missing_issues_file(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "## Implementation Summary\nUsed hash map\n## End\n",
+        encoding="utf-8",
+    )
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 2)
+
+    assert "Attempt 1" in result
+    assert "hash map" in result
+
+
+def test_build_avoidance_summary_both_missing(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 2)
+
+    assert result == ""
+
+
+def test_build_avoidance_summary_multiple_attempts(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "## Implementation Summary\nUsed binary search\n## End\n",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md.attempt-2").write_text(
+        "## Implementation Summary\nUsed hash map\n## End\n",
+        encoding="utf-8",
+    )
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"description": "off by one", "severity": "blocker"}]}),
+        encoding="utf-8",
+    )
+    (sprint_dir / "issues.json.attempt-2").write_text(
+        json.dumps({"issues": [{"description": "timeout on large input", "severity": "major"}]}),
+        encoding="utf-8",
+    )
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 3)
+
+    assert "Attempt 1" in result
+    assert "Attempt 2" in result
+    assert "off by one" in result
+    assert "timeout on large input" in result
+
+
+def test_build_avoidance_summary_prefers_archives_over_current(tmp_path: Path):
+    """Per-attempt gen_report archives should be preferred over current gen_report.md."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "## Implementation Summary\nUsed linked list approach\n## End\n",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md").write_text(
+        "## Implementation Summary\nUsed tree structure\n## End\n",
+        encoding="utf-8",
+    )
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"description": "too slow", "severity": "blocker"}]}),
+        encoding="utf-8",
+    )
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 2)
+
+    assert "linked list approach" in result
+    assert "tree structure" not in result
 
 
 # ── v0.3.0 multi-dimensional evaluation perspectives tests ──────
@@ -1159,3 +1240,52 @@ def test_result_includes_model_perspectives(monkeypatch: pytest.MonkeyPatch, tmp
         "codex": "accuracy_coverage",
         "gemini": "security_edge",
     }
+
+
+# ── v0.3.0 issue priority P0-P3 tests ────────────────────────────────────────
+
+
+def test_normalize_issue_priority_from_severity():
+    issue = {"severity": "blocker"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["priority"] == "P0"
+    assert result["severity"] == "blocker"
+
+
+def test_normalize_issue_priority_from_priority():
+    issue = {"priority": "P1"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["severity"] == "critical"
+    assert result["priority"] == "P1"
+
+
+def test_normalize_issue_priority_both_present():
+    issue = {"severity": "minor", "priority": "P0"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["severity"] == "minor"
+    assert result["priority"] == "P0"
+
+
+def test_normalize_issue_priority_neither_present():
+    issue = {"description": "some issue"}
+    result = eval_dispatch.normalize_issue_priority(issue)
+    assert result["priority"] == "P2"
+    assert result["severity"] == "major"
+
+
+def test_has_blocker_or_major_with_p0():
+    assert eval_dispatch.has_blocker_or_major([{"priority": "P0"}])
+
+
+def test_has_blocker_or_major_with_p3_only():
+    assert not eval_dispatch.has_blocker_or_major([{"priority": "P3"}])
+
+
+def test_build_eval_prompt_includes_priority_guide():
+    prompt = eval_dispatch.build_eval_prompt(
+        "AC-001",
+        "Implementation completed successfully.",
+        "### file.py\n```py\npass\n```",
+    )
+    assert "P0" in prompt
+    assert "Priority Guide" in prompt

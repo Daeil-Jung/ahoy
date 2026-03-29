@@ -54,6 +54,126 @@ PERSPECTIVES: dict[str, dict[str, str]] = {
     },
 }
 
+_SEVERITY_TO_PRIORITY = {
+    "blocker": "P0",
+    "critical": "P1",
+    "major": "P2",
+    "minor": "P3",
+}
+
+_PRIORITY_TO_SEVERITY = {v: k for k, v in _SEVERITY_TO_PRIORITY.items()}
+
+
+def normalize_issue_priority(issue: dict) -> dict:
+    """Ensure each issue has both severity and priority fields."""
+    if "priority" not in issue and "severity" in issue:
+        issue["priority"] = _SEVERITY_TO_PRIORITY.get(issue["severity"], "P2")
+    elif "severity" not in issue and "priority" in issue:
+        issue["severity"] = _PRIORITY_TO_SEVERITY.get(issue["priority"], "major")
+    elif "priority" not in issue and "severity" not in issue:
+        issue["priority"] = "P2"
+        issue["severity"] = "major"
+    return issue
+
+_SENSITIVE_PATTERNS: list[tuple[str, str, re.Pattern]] = [
+    ("API_KEY", "MASKED_API_KEY", re.compile(
+        r"""(?:api[_-]?key|apikey|api[_-]?token|access[_-]?token|auth[_-]?token)"""
+        r"""[\s]*[=:]\s*["']([A-Za-z0-9\-_\.]{20,})["']""",
+        re.IGNORECASE,
+    )),
+    ("PASSWORD", "MASKED_PASSWORD", re.compile(
+        r"""(?:password|passwd|pwd|secret)[\s]*[=:]\s*["']([^"'\s]{4,})["']""",
+        re.IGNORECASE,
+    )),
+    ("CONNECTION_STRING", "MASKED_CONN_STRING", re.compile(
+        r"""(?:mongodb|postgres|mysql|redis|amqp|sqlite):\/\/[^\s"']+""",
+        re.IGNORECASE,
+    )),
+    ("BEARER_TOKEN", "MASKED_BEARER", re.compile(
+        r"""Bearer\s+[A-Za-z0-9\-_\.]{20,}""",
+        re.IGNORECASE,
+    )),
+    ("AWS_KEY", "MASKED_AWS_KEY", re.compile(
+        r"""(?:AKIA|ASIA)[A-Z0-9]{16}""",
+    )),
+    ("PRIVATE_KEY", "MASKED_PRIVATE_KEY", re.compile(
+        r"""-----BEGIN[A-Z\s]*PRIVATE\s+KEY-----[\s\S]*?-----END[A-Z\s]*PRIVATE\s+KEY-----""",
+    )),
+    ("GENERIC_SECRET", "MASKED_SECRET", re.compile(
+        r"""(?:secret|credential|token)[\s]*[=:]\s*["']([A-Za-z0-9\-_\.]{16,})["']""",
+        re.IGNORECASE,
+    )),
+]
+
+
+class SensitiveDataMasker:
+    """Detects and masks sensitive data in code strings."""
+
+    def __init__(self, extra_patterns: list[dict] | None = None):
+        self._counter: dict[str, int] = {}
+        self._mask_map: dict[str, str] = {}
+        self._patterns = list(_SENSITIVE_PATTERNS)
+        if extra_patterns:
+            for ep in extra_patterns:
+                try:
+                    if not isinstance(ep, dict):
+                        print(f"[eval_dispatch] WARNING: Skipping non-dict masking pattern: {type(ep)}", file=sys.stderr)
+                        continue
+                    category = ep["category"]
+                    prefix = ep["mask_prefix"]
+                    compiled = re.compile(ep["regex"], re.IGNORECASE)
+                    self._patterns.append((category, prefix, compiled))
+                except (KeyError, re.error, TypeError) as exc:
+                    print(f"[eval_dispatch] WARNING: Skipping invalid masking pattern: {exc}", file=sys.stderr)
+
+    def mask(self, text: str) -> str:
+        """Replace sensitive data with [MASKED_*] tokens. Preserves line count."""
+        # Collect all matches with their positions
+        replacements: list[tuple[int, int, str]] = []  # (start, end, token)
+
+        for _category, prefix, pattern in self._patterns:
+            for match in pattern.finditer(text):
+                # Prefer capture group (just the secret) over full match
+                if match.lastindex and match.lastindex >= 1:
+                    original = match.group(1)
+                    start, end = match.start(1), match.end(1)
+                else:
+                    original = match.group(0)
+                    start, end = match.start(0), match.end(0)
+
+                # Reuse existing token for same literal
+                existing = [k for k, v in self._mask_map.items() if v == original]
+                if existing:
+                    token = existing[0]
+                else:
+                    idx = self._counter.get(prefix, 1)
+                    self._counter[prefix] = idx + 1
+                    token = f"[{prefix}_{idx}]"
+                    self._mask_map[token] = original
+
+                replacements.append((start, end, token))
+
+        # Sort by position descending so replacements don't shift earlier offsets
+        replacements.sort(key=lambda r: r[0], reverse=True)
+
+        # Apply replacements
+        result = text
+        for start, end, token in replacements:
+            result = result[:start] + token + result[end:]
+
+        return result
+
+    def get_mask_report(self) -> list[dict]:
+        """Return masking summary (without revealing values)."""
+        return [
+            {"token": token, "category": token.rsplit("_", 1)[0].strip("[]")}
+            for token in self._mask_map
+        ]
+
+    @property
+    def masked_count(self) -> int:
+        return len(self._mask_map)
+
 
 def strip_generator_opinions(gen_report: str) -> str:
     """Remove Generator's self-assessment/opinions from gen_report.md, keeping only factual information.
@@ -267,6 +387,7 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
     {{
       "id": "ISS-001",
       "severity": "blocker or major or minor",
+      "priority": "P0 or P1 or P2 or P3",
       "category": "functional or test or quality or performance",
       "description": "specific issue description",
       "acceptance_criterion": "AC-001",
@@ -278,7 +399,13 @@ The `reasoning_chain` field is REQUIRED — you must fill every sub-field before
   "failed_criteria": ["AC-002"],
   "summary": "one-line overall evaluation summary"
 }}
-```"""
+```
+
+Priority Guide:
+- P0 (blocker): Prevents core functionality. Must fix immediately.
+- P1 (critical): Serious bug or security issue. Must fix in this cycle.
+- P2 (major): Significant quality/correctness issue. Should fix.
+- P3 (minor): Nit, style, minor improvement. Fix if time permits."""
 
 
 def _build_cmd_string(cmd: list[str]) -> str:
@@ -463,7 +590,7 @@ def resolve_reported_files(gen_report: str) -> list[str]:
     return list(dict.fromkeys(fallback_pattern.findall(gen_report)))
 
 
-def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
+def collect_code_snippets(sprint_dir: Path, project_root: Path, masker: SensitiveDataMasker | None = None) -> str:
     """Read file list from gen_report.md and collect code snippets."""
     gen_report_path = sprint_dir / "gen_report.md"
     if not gen_report_path.exists():
@@ -484,6 +611,8 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
         if file_path.exists() and file_path.stat().st_size < 50_000:
             try:
                 code = file_path.read_text(encoding="utf-8")
+                if masker:
+                    code = masker.mask(code)
                 snippets.append(f"### {file_rel}\n```\n{code}\n```")
             except (UnicodeDecodeError, OSError):
                 pass
@@ -494,8 +623,85 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
     return "\n\n".join(snippets)
 
 
+def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
+    """Build a structured avoidance pattern summary from previous attempts.
+
+    Reads per-attempt gen_report archives (gen_report.md.attempt-{N}) and
+    issues.json.attempt-N files to extract what was tried and why it failed.
+    Returns markdown string for injection into Generator prompt.
+
+    Returns empty string if current_attempt < 2.
+    """
+    if current_attempt < 2:
+        return ""
+
+    sections = []
+    for prev_attempt in range(1, current_attempt):
+        attempt_section = f"### Attempt {prev_attempt}\n"
+
+        # Read per-attempt gen_report archive instead of current gen_report.md
+        approach_summary = ""
+        gen_report_path = sprint_dir / f"gen_report.md.attempt-{prev_attempt}"
+        if not gen_report_path.exists():
+            # Fallback to current gen_report.md for backward compat
+            gen_report_path = sprint_dir / "gen_report.md"
+        if gen_report_path.exists():
+            try:
+                report_text = gen_report_path.read_text(encoding="utf-8")
+                summary_match = re.search(
+                    r"## Implementation Summary\s*\n([\s\S]*?)(?=\n## |\Z)",
+                    report_text,
+                )
+                if summary_match:
+                    approach_summary = summary_match.group(1).strip()[:500]
+            except OSError:
+                pass
+
+        issues_file = sprint_dir / f"issues.json.attempt-{prev_attempt}"
+        failure_reasons: list[str] = []
+        if issues_file.exists():
+            try:
+                data = json.loads(issues_file.read_text(encoding="utf-8"))
+                for issue in data.get("issues", [])[:5]:
+                    desc = issue.get("description", "")
+                    severity = issue.get("severity", "")
+                    failure_reasons.append(f"- [{severity}] {desc}")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if approach_summary:
+            attempt_section += f"**Approach taken**: {approach_summary}\n\n"
+        if failure_reasons:
+            attempt_section += "**Failed because**:\n" + "\n".join(failure_reasons) + "\n\n"
+
+        if approach_summary or failure_reasons:
+            sections.append(attempt_section)
+
+    if not sections:
+        return ""
+
+    header = (
+        "## Avoidance Patterns (DO NOT repeat these approaches)\n\n"
+        "The following approaches have been tried and failed. "
+        "You MUST use a fundamentally different implementation strategy.\n\n"
+    )
+
+    footer = (
+        "\n## Diversification Instructions\n"
+        "- Use a different algorithm, data structure, or architectural approach from above.\n"
+        "- Explicitly state how your new approach differs from the failed attempts.\n"
+        "- If the previous attempt used approach X, choose an alternative.\n"
+    )
+
+    return header + "\n".join(sections) + footer
+
+
 def has_blocker_or_major(issues: list[dict]) -> bool:
-    return any(issue.get("severity") in {"blocker", "major"} for issue in issues)
+    return any(
+        issue.get("severity") in {"blocker", "major"}
+        or issue.get("priority") in {"P0", "P1"}
+        for issue in issues
+    )
 
 
 def derive_status_action(verdict: str, issues: list[dict]) -> str:
@@ -684,6 +890,7 @@ def compute_consensus(
     for model_name, result in valid.items():
         for issue in result.get("issues", []):
             issue["found_by"] = model_name
+            normalize_issue_priority(issue)
             all_issues.append(issue)
 
     # Merge objections from all valid models
@@ -963,6 +1170,7 @@ def _record_convergence(
 
 
 
+
 def _tokenize(text: str) -> set[str]:
     """Simple word tokenization for Jaccard similarity."""
     return set(re.findall(r"\w+", text.lower()))
@@ -1071,6 +1279,7 @@ def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
     return "## Previous Attempt Approaches (avoid repeating)\n\n" + "\n\n".join(sections)
 
 
+
 def main() -> int:
     config = load_config()
     default_models = ",".join(config.get("eval_models", ["codex", "claude"]))
@@ -1121,13 +1330,22 @@ def main() -> int:
     if gen_report_path.exists():
         gen_report = gen_report_path.read_text(encoding="utf-8")
 
+    masking_config = config.get("sensitive_data_masking", {})
+    masker = None
+    if masking_config.get("enabled", True):
+        extra = masking_config.get("extra_patterns", [])
+        masker = SensitiveDataMasker(extra_patterns=extra if extra else None)
+
     try:
-        code_snippets = collect_code_snippets(sprint_dir, project_root)
+        code_snippets = collect_code_snippets(sprint_dir, project_root, masker=masker)
     except ValueError as exc:
         result = _error_result(sprint_dir, models, str(exc))
         write_result(sprint_dir, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
+
+    if masker and masker.masked_count > 0:
+        print(f"[eval_dispatch] Sensitive data masking: {masker.masked_count} items masked", file=sys.stderr)
 
     # Build per-model prompts with perspectives
     perspectives = config.get("eval_perspectives", {})
@@ -1314,6 +1532,9 @@ def main() -> int:
     if hollow["detected"]:
         print(f"[eval_dispatch] WARNING: Hollow consensus detected \u2014 {hollow['reasons']}", file=sys.stderr)
         result["hollow_consensus"] = hollow
+
+    if masker and masker.masked_count > 0:
+        result["masking_report"] = masker.get_mask_report()
 
     # Save issues.json
     write_result(sprint_dir, result)
