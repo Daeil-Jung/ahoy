@@ -264,11 +264,12 @@ def record_read_hash() -> None:
     file_path = tool_input.get("file_path", "")
     if not file_path:
         return
-    resolved = Path(file_path)
+    resolved = Path(file_path).resolve()
     if not resolved.is_file():
         return
+    canonical_key = str(resolved)
     hashes = _load_read_hashes()
-    hashes[str(resolved)] = _file_hash(resolved)
+    hashes[canonical_key] = _file_hash(resolved)
     _save_read_hashes(hashes)
 
 
@@ -284,11 +285,12 @@ def check_stale_read() -> None:
     file_path = tool_input.get("file_path", "")
     if not file_path:
         return
-    resolved = Path(file_path)
+    resolved = Path(file_path).resolve()
     if not resolved.is_file():
         return  # New file creation — no hash to compare
+    canonical_key = str(resolved)
     hashes = _load_read_hashes()
-    stored_hash = hashes.get(str(resolved))
+    stored_hash = hashes.get(canonical_key)
     if stored_hash is None:
         print(f"[HARNESS-WARN] No Read recorded for {file_path} — proceeding without stale check", file=sys.stderr)
         return
@@ -1087,16 +1089,27 @@ def check_anti_rationalization() -> None:
     except json.JSONDecodeError:
         return
 
-    content = tool_input.get("new_string") or tool_input.get("content") or ""
-    if not content:
+    tool_content = tool_input.get("new_string") or tool_input.get("content") or ""
+    if not tool_content:
         return
+
+    # Build full content from disk + incoming write for complete AC coverage
+    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
+    if gen_report_path.exists():
+        try:
+            disk_content = gen_report_path.read_text(encoding="utf-8")
+            full_content = disk_content + "\n" + tool_content
+        except OSError:
+            full_content = tool_content
+    else:
+        full_content = tool_content
 
     # Find "Unresolved Issues" section and check for rationalized ACs
     rationalized: list[str] = []
     missing: list[str] = []
     in_unresolved = False
 
-    for line in content.splitlines():
+    for line in full_content.splitlines():
         stripped = line.strip()
         if re.match(r"^#{1,4}\s+Unresolved", stripped, re.IGNORECASE):
             in_unresolved = True
@@ -1112,7 +1125,7 @@ def check_anti_rationalization() -> None:
 
     # Check for ACs completely missing from the report
     for ac_id in ac_ids:
-        if ac_id not in content:
+        if ac_id not in full_content:
             missing.append(ac_id)
 
     blocked: list[str] = []
