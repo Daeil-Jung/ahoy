@@ -843,56 +843,106 @@ def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.Monkey
     assert exit_code == 1
 
 
-# ── build_avoidance_summary tests ──────────────────────────────
+# ── Hollow consensus detection tests ─────────────────────────────
 
 
-def test_build_avoidance_summary_reads_per_attempt_archives(tmp_path: Path):
-    """build_avoidance_summary should read gen_report.md.attempt-N files."""
-    sprint_dir = tmp_path / "sprint-001"
-    sprint_dir.mkdir()
+def test_compute_rationale_similarity_high():
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "The code passes all acceptance criteria and tests run correctly"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "The code passes all acceptance criteria and tests run correctly"}},
+    }
+    sim = eval_dispatch.compute_rationale_similarity(verdicts)
+    assert sim > 0.85
 
-    (sprint_dir / "gen_report.md.attempt-1").write_text(
-        "# Report\nApproach: used retry logic\nFiles modified: a.py",
+
+def test_compute_rationale_similarity_low():
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "The authentication module validates JWT tokens properly with correct expiry handling"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "Database migration scripts create indexes on foreign keys for performance optimization"}},
+    }
+    sim = eval_dispatch.compute_rationale_similarity(verdicts)
+    assert sim < 0.5
+
+
+def test_compute_rationale_similarity_missing_chain():
+    verdicts = {
+        "codex": {"verdict": "pass"},
+        "claude": {"verdict": "pass"},
+    }
+    assert eval_dispatch.compute_rationale_similarity(verdicts) == 0.0
+
+
+def test_get_rolling_pass_rate(tmp_path: Path):
+    state_file = tmp_path / "harness_state.json"
+    state_file.write_text(
+        json.dumps({
+            "sprints": [
+                {"sprint_id": f"sprint-{i:03d}", "status": "passed" if i < 9 else "failed"}
+                for i in range(10)
+            ]
+        }),
         encoding="utf-8",
     )
-    (sprint_dir / "gen_report.md.attempt-2").write_text(
-        "# Report\nApproach: used caching\nFiles modified: b.py",
-        encoding="utf-8",
-    )
-    (sprint_dir / "gen_report.md").write_text(
-        "# Report\nApproach: complete rewrite\nFiles modified: c.py",
-        encoding="utf-8",
-    )
-
-    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=2)
-
-    assert "Attempt 1" in summary
-    assert "retry logic" in summary
-    assert "Attempt 2" in summary
-    assert "caching" in summary
-    assert "Previous Attempt Approaches" in summary
+    rate = eval_dispatch.get_rolling_pass_rate(state_file)
+    assert rate == 0.9
 
 
-def test_build_avoidance_summary_falls_back_to_current_gen_report(tmp_path: Path):
-    """When no per-attempt archive exists, fall back to current gen_report.md."""
-    sprint_dir = tmp_path / "sprint-001"
-    sprint_dir.mkdir()
-
-    (sprint_dir / "gen_report.md").write_text(
-        "# Report\nApproach: initial attempt",
+def test_detect_hollow_consensus_triggers(tmp_path: Path):
+    """Requires BOTH high similarity AND high pass rate."""
+    state_file = tmp_path / "harness_state.json"
+    state_file.write_text(
+        json.dumps({
+            "sprints": [{"sprint_id": f"sprint-{i:03d}", "status": "passed"} for i in range(10)]
+        }),
         encoding="utf-8",
     )
 
-    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=1)
+    consensus = {"consensus_verdict": "pass", "issues": []}
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+    }
+    result = eval_dispatch.detect_hollow_consensus(consensus, verdicts, state_file)
+    assert result["detected"] is True
+    assert any("high_rationale_similarity" in r for r in result["reasons"])
+    assert any("rolling_pass_rate" in r for r in result["reasons"])
 
-    assert "Attempt 1" in summary
-    assert "initial attempt" in summary
+
+def test_detect_hollow_consensus_not_triggered(tmp_path: Path):
+    state_file = tmp_path / "harness_state.json"
+    state_file.write_text(json.dumps({"sprints": []}), encoding="utf-8")
+
+    consensus = {"consensus_verdict": "fail", "issues": [{"severity": "major"}]}
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "Tests fail on edge cases"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "Missing error handling"}},
+    }
+    result = eval_dispatch.detect_hollow_consensus(consensus, verdicts, state_file)
+    assert result["detected"] is False
 
 
-def test_build_avoidance_summary_returns_empty_for_first_attempt(tmp_path: Path):
-    """No avoidance summary needed on the first attempt (attempt=0)."""
-    sprint_dir = tmp_path / "sprint-001"
-    sprint_dir.mkdir()
+def test_detect_hollow_consensus_similarity_only_not_triggered(tmp_path: Path):
+    """High similarity alone should NOT trigger — needs high pass rate too."""
+    state_file = tmp_path / "harness_state.json"
+    state_file.write_text(json.dumps({"sprints": []}), encoding="utf-8")
 
-    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=0)
-    assert summary == ""
+    consensus = {"consensus_verdict": "pass", "issues": []}
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+    }
+    result = eval_dispatch.detect_hollow_consensus(consensus, verdicts, state_file)
+    assert result["detected"] is False
+
+
+def test_detect_hollow_consensus_with_issues(tmp_path: Path):
+    state_file = tmp_path / "harness_state.json"
+    state_file.write_text(json.dumps({"sprints": []}), encoding="utf-8")
+
+    consensus = {"consensus_verdict": "pass", "issues": [{"severity": "minor", "description": "nit"}]}
+    verdicts = {
+        "codex": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+        "claude": {"reasoning_chain": {"final_reasoning": "All criteria pass and code is correct and complete"}},
+    }
+    result = eval_dispatch.detect_hollow_consensus(consensus, verdicts, state_file)
+    assert result["detected"] is False

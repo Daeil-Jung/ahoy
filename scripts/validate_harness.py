@@ -978,6 +978,24 @@ def check_post_edit_quality() -> None:
     info(f"[HARNESS-GUARD] Passed: Post-edit quality check — '{file_path}'")
 
 
+def check_hollow_consensus() -> None:
+    """Post-eval: warn if hollow consensus detected in latest issues.json."""
+    state = load_state()
+    if not state:
+        return
+    current_sprint = get_current_sprint(state)
+    if not current_sprint:
+        return
+    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+    issues_file = sprint_dir / "issues.json"
+    data = load_json(issues_file)
+    if not data:
+        return
+    hc = data.get("hollow_consensus")
+    if hc and hc.get("detected"):
+        info(f"[HARNESS-WARN] Hollow consensus detected: {hc.get('reasons', [])}")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
@@ -992,6 +1010,7 @@ CHECKS = {
     "pre-push": check_pre_push,
     "post-edit-quality": check_post_edit_quality,
     "circuit-breaker": check_circuit_breaker,
+    "hollow-consensus": check_hollow_consensus,
 }
 
 
