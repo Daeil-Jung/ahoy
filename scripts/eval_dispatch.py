@@ -521,6 +521,79 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
     return "\n\n".join(snippets)
 
 
+def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
+    """Build a structured avoidance pattern summary from previous attempts.
+
+    Reads per-attempt gen_report archives (gen_report.md.attempt-{N}) and
+    issues.json.attempt-N files to extract what was tried and why it failed.
+    Returns markdown string for injection into Generator prompt.
+
+    Returns empty string if current_attempt < 2.
+    """
+    if current_attempt < 2:
+        return ""
+
+    sections = []
+    for prev_attempt in range(1, current_attempt):
+        attempt_section = f"### Attempt {prev_attempt}\n"
+
+        # Read per-attempt gen_report archive instead of current gen_report.md
+        approach_summary = ""
+        gen_report_path = sprint_dir / f"gen_report.md.attempt-{prev_attempt}"
+        if not gen_report_path.exists():
+            # Fallback to current gen_report.md for backward compat
+            gen_report_path = sprint_dir / "gen_report.md"
+        if gen_report_path.exists():
+            try:
+                report_text = gen_report_path.read_text(encoding="utf-8")
+                summary_match = re.search(
+                    r"## Implementation Summary\s*\n([\s\S]*?)(?=\n## |\Z)",
+                    report_text,
+                )
+                if summary_match:
+                    approach_summary = summary_match.group(1).strip()[:500]
+            except OSError:
+                pass
+
+        issues_file = sprint_dir / f"issues.json.attempt-{prev_attempt}"
+        failure_reasons: list[str] = []
+        if issues_file.exists():
+            try:
+                data = json.loads(issues_file.read_text(encoding="utf-8"))
+                for issue in data.get("issues", [])[:5]:
+                    desc = issue.get("description", "")
+                    severity = issue.get("severity", "")
+                    failure_reasons.append(f"- [{severity}] {desc}")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if approach_summary:
+            attempt_section += f"**Approach taken**: {approach_summary}\n\n"
+        if failure_reasons:
+            attempt_section += "**Failed because**:\n" + "\n".join(failure_reasons) + "\n\n"
+
+        if approach_summary or failure_reasons:
+            sections.append(attempt_section)
+
+    if not sections:
+        return ""
+
+    header = (
+        "## Avoidance Patterns (DO NOT repeat these approaches)\n\n"
+        "The following approaches have been tried and failed. "
+        "You MUST use a fundamentally different implementation strategy.\n\n"
+    )
+
+    footer = (
+        "\n## Diversification Instructions\n"
+        "- Use a different algorithm, data structure, or architectural approach from above.\n"
+        "- Explicitly state how your new approach differs from the failed attempts.\n"
+        "- If the previous attempt used approach X, choose an alternative.\n"
+    )
+
+    return header + "\n".join(sections) + footer
+
+
 def has_blocker_or_major(issues: list[dict]) -> bool:
     return any(
         issue.get("severity") in {"blocker", "major"}
@@ -992,38 +1065,6 @@ def _record_convergence(
         )
     except OSError as exc:
         print(f"[eval_dispatch] Failed to update harness_state.json: {exc}", file=sys.stderr)
-
-
-def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
-    """Build a summary of previous attempts' approaches for avoidance guidance.
-
-    Reads per-attempt gen_report archives (gen_report.md.attempt-{N}) instead of
-    the current gen_report.md, which gets overwritten each attempt.
-    """
-    if current_attempt < 1:
-        return ""
-
-    sections: list[str] = []
-    for prev_attempt in range(1, current_attempt + 1):
-        gen_report_path = sprint_dir / f"gen_report.md.attempt-{prev_attempt}"
-        if not gen_report_path.exists():
-            # Fallback to current gen_report.md for backward compat
-            gen_report_path = sprint_dir / "gen_report.md"
-
-        if not gen_report_path.exists():
-            continue
-
-        report_text = gen_report_path.read_text(encoding="utf-8")
-        # Extract a concise approach summary (first ~20 non-empty lines)
-        lines = [ln for ln in report_text.split("\n") if ln.strip()]
-        approach_summary = "\n".join(lines[:20])
-        if approach_summary:
-            sections.append(f"### Attempt {prev_attempt}\n{approach_summary}")
-
-    if not sections:
-        return ""
-
-    return "## Previous Attempt Approaches (avoid repeating)\n\n" + "\n\n".join(sections)
 
 
 def main() -> int:
