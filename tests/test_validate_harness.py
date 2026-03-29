@@ -802,3 +802,49 @@ def test_hooks_json_covers_all_expected_check_types():
     ]
     for check in expected_checks:
         assert check in combined, f"Missing hook check: {check}"
+
+
+# ── gen_report.md archiving tests ──────────────────────────────
+
+
+def test_circuit_breaker_archives_gen_report(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """check_circuit_breaker() should archive gen_report.md alongside issues.json."""
+    monkeypatch.chdir(tmp_path)
+
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps({
+            "current_sprint_index": 0,
+            "sprints": [{"sprint_id": "sprint-001", "status": "generated", "attempt": 2}],
+        }),
+        encoding="utf-8",
+    )
+
+    sprint_dir = harness_dir / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+
+    (sprint_dir / "issues.json").write_text(
+        json.dumps({
+            "status_action": "failed",
+            "issues": [{"category": "functional", "description": "Bug A"}],
+        }),
+        encoding="utf-8",
+    )
+
+    gen_content = "# Gen Report\n\nAttempt 2 approach details here."
+    (sprint_dir / "gen_report.md").write_text(gen_content, encoding="utf-8")
+
+    (sprint_dir / "issues.json.attempt-1").write_text(
+        json.dumps({"issues": [{"category": "functional", "description": "Bug A"}]}),
+        encoding="utf-8",
+    )
+
+    try:
+        validate_harness.check_circuit_breaker()
+    except SystemExit:
+        pass
+
+    archived = sprint_dir / "gen_report.md.attempt-2"
+    assert archived.exists(), "gen_report.md should be archived as gen_report.md.attempt-2"
+    assert archived.read_text(encoding="utf-8") == gen_content

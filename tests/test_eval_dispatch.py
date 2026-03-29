@@ -841,3 +841,58 @@ def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.Monkey
     # Round 2 quorum lost -> falls back to round 1, which had a fail -> final fail
     assert payload["verdict"] == "fail"
     assert exit_code == 1
+
+
+# ── build_avoidance_summary tests ──────────────────────────────
+
+
+def test_build_avoidance_summary_reads_per_attempt_archives(tmp_path: Path):
+    """build_avoidance_summary should read gen_report.md.attempt-N files."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "# Report\nApproach: used retry logic\nFiles modified: a.py",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md.attempt-2").write_text(
+        "# Report\nApproach: used caching\nFiles modified: b.py",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md").write_text(
+        "# Report\nApproach: complete rewrite\nFiles modified: c.py",
+        encoding="utf-8",
+    )
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=2)
+
+    assert "Attempt 1" in summary
+    assert "retry logic" in summary
+    assert "Attempt 2" in summary
+    assert "caching" in summary
+    assert "Previous Attempt Approaches" in summary
+
+
+def test_build_avoidance_summary_falls_back_to_current_gen_report(tmp_path: Path):
+    """When no per-attempt archive exists, fall back to current gen_report.md."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    (sprint_dir / "gen_report.md").write_text(
+        "# Report\nApproach: initial attempt",
+        encoding="utf-8",
+    )
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=1)
+
+    assert "Attempt 1" in summary
+    assert "initial attempt" in summary
+
+
+def test_build_avoidance_summary_returns_empty_for_first_attempt(tmp_path: Path):
+    """No avoidance summary needed on the first attempt (attempt=0)."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=0)
+    assert summary == ""

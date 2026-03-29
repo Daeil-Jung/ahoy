@@ -369,6 +369,19 @@ def check_circuit_breaker() -> None:
                 file=sys.stderr,
             )
 
+    # Archive current gen_report.md as gen_report.md.attempt-{N} so that
+    # build_avoidance_summary() can read per-attempt approach history instead
+    # of relying on the current (overwritten) gen_report.md.
+    gen_report_file = sprint_dir / "gen_report.md"
+    if gen_report_file.exists() and current_attempt >= 1:
+        gen_backup = sprint_dir / f"gen_report.md.attempt-{current_attempt}"
+        if not gen_backup.exists():
+            shutil.copy2(gen_report_file, gen_backup)
+            print(
+                f"[validate_harness] Archived {gen_report_file.name} as {gen_backup.name}",
+                file=sys.stderr,
+            )
+
     pattern = detect_failure_pattern(sprint_dir, current_attempt)
 
     # Output the pattern as structured JSON so the orchestrator can persist it

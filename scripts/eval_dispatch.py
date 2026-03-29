@@ -933,6 +933,38 @@ def _record_convergence(
         print(f"[eval_dispatch] Failed to update harness_state.json: {exc}", file=sys.stderr)
 
 
+def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
+    """Build a summary of previous attempts' approaches for avoidance guidance.
+
+    Reads per-attempt gen_report archives (gen_report.md.attempt-{N}) instead of
+    the current gen_report.md, which gets overwritten each attempt.
+    """
+    if current_attempt < 1:
+        return ""
+
+    sections: list[str] = []
+    for prev_attempt in range(1, current_attempt + 1):
+        gen_report_path = sprint_dir / f"gen_report.md.attempt-{prev_attempt}"
+        if not gen_report_path.exists():
+            # Fallback to current gen_report.md for backward compat
+            gen_report_path = sprint_dir / "gen_report.md"
+
+        if not gen_report_path.exists():
+            continue
+
+        report_text = gen_report_path.read_text(encoding="utf-8")
+        # Extract a concise approach summary (first ~20 non-empty lines)
+        lines = [ln for ln in report_text.split("\n") if ln.strip()]
+        approach_summary = "\n".join(lines[:20])
+        if approach_summary:
+            sections.append(f"### Attempt {prev_attempt}\n{approach_summary}")
+
+    if not sections:
+        return ""
+
+    return "## Previous Attempt Approaches (avoid repeating)\n\n" + "\n\n".join(sections)
+
+
 def main() -> int:
     config = load_config()
     default_models = ",".join(config.get("eval_models", ["codex", "claude"]))
