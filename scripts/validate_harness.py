@@ -1069,12 +1069,7 @@ def check_anti_rationalization() -> None:
 
     # Parse acceptance criteria from contract.md
     contract_text = contract_path.read_text(encoding="utf-8")
-    ac_ids: list[str] = []
-    for line in contract_text.splitlines():
-        stripped = line.strip()
-        match = re.match(r"^[-*]\s+\[?\s*(AC-\d+)", stripped)
-        if match:
-            ac_ids.append(match.group(1))
+    ac_ids: list[str] = re.findall(r"\bAC-\d+\b", contract_text)
 
     if not ac_ids:
         return  # No ACs defined
@@ -1089,27 +1084,38 @@ def check_anti_rationalization() -> None:
     except json.JSONDecodeError:
         return
 
-    tool_content = tool_input.get("new_string") or tool_input.get("content") or ""
-    if not tool_content:
+    new_string = tool_input.get("new_string", "")
+    old_string = tool_input.get("old_string", "")
+    write_content = tool_input.get("content", "")
+
+    if not new_string and not write_content:
         return
 
-    # Build full content from disk + incoming write for complete AC coverage
+    # Reconstruct post-edit file state:
+    # - Write tool: content IS the full file
+    # - Edit tool: apply old_string→new_string on disk content
     gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
-    if gen_report_path.exists():
+
+    if write_content:
+        post_edit_content = write_content
+    elif new_string and gen_report_path.exists():
         try:
             disk_content = gen_report_path.read_text(encoding="utf-8")
-            full_content = disk_content + "\n" + tool_content
+            if old_string:
+                post_edit_content = disk_content.replace(old_string, new_string, 1)
+            else:
+                post_edit_content = disk_content + "\n" + new_string
         except OSError:
-            full_content = tool_content
+            post_edit_content = new_string
     else:
-        full_content = tool_content
+        post_edit_content = new_string or write_content
 
     # Find "Unresolved Issues" section and check for rationalized ACs
     rationalized: list[str] = []
     missing: list[str] = []
     in_unresolved = False
 
-    for line in full_content.splitlines():
+    for line in post_edit_content.splitlines():
         stripped = line.strip()
         if re.match(r"^#{1,4}\s+Unresolved", stripped, re.IGNORECASE):
             in_unresolved = True
@@ -1125,7 +1131,7 @@ def check_anti_rationalization() -> None:
 
     # Check for ACs completely missing from the report
     for ac_id in ac_ids:
-        if ac_id not in full_content:
+        if ac_id not in post_edit_content:
             missing.append(ac_id)
 
     blocked: list[str] = []
