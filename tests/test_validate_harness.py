@@ -798,7 +798,7 @@ def test_hooks_json_covers_all_expected_check_types():
         "scope-check", "pre-state-write", "post-state-write",
         "pre-gen", "post-eval", "guard-eval-files",
         "audit-final-scope", "pre-commit", "pre-push",
-        "post-edit-quality", "circuit-breaker",
+        "post-edit-quality", "circuit-breaker", "anti-rationalization",
     ]
     for check in expected_checks:
         assert check in combined, f"Missing hook check: {check}"
@@ -848,3 +848,89 @@ def test_circuit_breaker_archives_gen_report(monkeypatch: pytest.MonkeyPatch, tm
     archived = sprint_dir / "gen_report.md.attempt-2"
     assert archived.exists(), "gen_report.md should be archived as gen_report.md.attempt-2"
     assert archived.read_text(encoding="utf-8") == gen_content
+
+
+# ── Anti-rationalization gate tests ──────────────────────────────
+
+
+def _setup_anti_rationalization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contract_acs: list[str],
+    gen_report_content: str,
+) -> None:
+    """Helper to set up harness state, contract, and CLAUDE_TOOL_INPUT for anti-rationalization tests."""
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path)
+    ac_lines = "\n".join(f"- {ac}" for ac in contract_acs)
+    write_contract(
+        tmp_path,
+        f"## Implementation Scope\n### Files to Modify\n- `src/app.py`\n\n## Acceptance Criteria\n{ac_lines}",
+    )
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "gen_report.md", "content": gen_report_content}),
+    )
+
+
+def test_anti_rationalization_passes_all_acs_covered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC | Status |\n| AC-001 | pass |\n| AC-002 | pass |\n",
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_blocks_rationalized_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | pass |\n\n## Unresolved Issues\n- AC-001: not needed for current implementation\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_blocks_missing_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_allows_honest_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | fail |\n\n## Unresolved Issues\n- AC-002: test suite fails due to timeout in CI\n",
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_detects_korean_patterns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works"],
+        "## AC Coverage\n| AC-001 | pass |\n\n## Unresolved Issues\n- AC-001: 현재 구조상 불필요\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_skips_non_harness_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    # No harness state set up — should pass silently
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "gen_report.md", "content": "## Unresolved Issues\n- AC-001: not needed\n"}),
+    )
+    validate_harness.check_anti_rationalization()

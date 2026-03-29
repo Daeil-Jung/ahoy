@@ -17,9 +17,12 @@ Usage: validate_harness.py <check_type>
     pre-push             — Run tests, lint, type check + verify state consistency before push
     post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
     circuit-breaker      — Detect repeated failure patterns across rework attempts
+    record-read          — After Read: record file hash for stale-read detection
+    stale-read-check     — Before Edit/Write: verify file has not changed since last Read
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -221,6 +224,80 @@ def fail(msg: str) -> None:
 
 def info(msg: str) -> None:
     print(msg)
+
+
+# ── Stale-read detection ──────────────────────────────────────
+
+_READ_HASH_FILE = HARNESS_DIR / ".read_hashes.json"
+
+
+def _file_hash(path: Path) -> str:
+    """Compute SHA-256 of file contents."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_read_hashes() -> dict[str, str]:
+    """Load the read hash registry."""
+    if _READ_HASH_FILE.exists():
+        try:
+            return json.loads(_READ_HASH_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_read_hashes(hashes: dict[str, str]) -> None:
+    """Persist the read hash registry."""
+    _READ_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _READ_HASH_FILE.write_text(json.dumps(hashes, indent=2), encoding="utf-8")
+
+
+def record_read_hash() -> None:
+    """PostToolUse Read: record the hash of the file that was just read."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+    resolved = Path(file_path)
+    if not resolved.is_file():
+        return
+    hashes = _load_read_hashes()
+    hashes[str(resolved)] = _file_hash(resolved)
+    _save_read_hashes(hashes)
+
+
+def check_stale_read() -> None:
+    """PreToolUse Edit/Write: compare current file hash to last-read hash."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+    resolved = Path(file_path)
+    if not resolved.is_file():
+        return  # New file creation — no hash to compare
+    hashes = _load_read_hashes()
+    stored_hash = hashes.get(str(resolved))
+    if stored_hash is None:
+        print(f"[HARNESS-WARN] No Read recorded for {file_path} — proceeding without stale check", file=sys.stderr)
+        return
+    current_hash = _file_hash(resolved)
+    if current_hash != stored_hash:
+        fail(
+            f"[HARNESS-GUARD] Blocked: Stale read detected for {file_path}. "
+            "File has been modified since last Read. Re-read the file before editing."
+        )
 
 
 # ── Failure pattern detection (circuit breaker) ────────────────
@@ -978,6 +1055,96 @@ def check_post_edit_quality() -> None:
     info(f"[HARNESS-GUARD] Passed: Post-edit quality check — '{file_path}'")
 
 
+# ── Anti-rationalization gate ─────────────────────────────────
+
+_RATIONALIZATION_PATTERNS = re.compile(
+    r"(unnecessary|not needed|not required|out of scope for this sprint|"
+    r"will be handled later|future sprint|currently not possible|"
+    r"beyond the scope|not applicable|deliberately omitted|"
+    r"skipped because|deferred to|left for future|"
+    r"현재 구조상 불필요|향후 처리|생략|불필요|추후)",
+    re.IGNORECASE,
+)
+
+
+def check_anti_rationalization() -> None:
+    """Block gen_report.md writes that rationalize unfulfilled acceptance criteria."""
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    if not current_sprint:
+        return
+
+    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
+    if not contract_path.exists():
+        return
+
+    # Parse acceptance criteria from contract.md
+    contract_text = contract_path.read_text(encoding="utf-8")
+    ac_ids: list[str] = []
+    for line in contract_text.splitlines():
+        stripped = line.strip()
+        match = re.match(r"^[-*]\s+\[?\s*(AC-\d+)", stripped)
+        if match:
+            ac_ids.append(match.group(1))
+
+    if not ac_ids:
+        return  # No ACs defined
+
+    # Read gen_report content from CLAUDE_TOOL_INPUT
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+
+    content = tool_input.get("new_string") or tool_input.get("content") or ""
+    if not content:
+        return
+
+    # Find "Unresolved Issues" section and check for rationalized ACs
+    rationalized: list[str] = []
+    missing: list[str] = []
+    in_unresolved = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if re.match(r"^#{1,4}\s+Unresolved", stripped, re.IGNORECASE):
+            in_unresolved = True
+            continue
+        if in_unresolved and re.match(r"^#{1,4}\s+", stripped):
+            in_unresolved = False
+            continue
+
+        if in_unresolved:
+            for ac_id in ac_ids:
+                if ac_id in stripped and _RATIONALIZATION_PATTERNS.search(stripped):
+                    rationalized.append(ac_id)
+
+    # Check for ACs completely missing from the report
+    for ac_id in ac_ids:
+        if ac_id not in content:
+            missing.append(ac_id)
+
+    blocked: list[str] = []
+    if rationalized:
+        blocked.append(f"Rationalized ACs: {', '.join(sorted(set(rationalized)))}")
+    if missing:
+        blocked.append(f"Missing ACs (not mentioned at all): {', '.join(sorted(set(missing)))}")
+
+    if blocked:
+        fail(
+            "[HARNESS-GUARD] Blocked: Anti-rationalization gate triggered\n"
+            + "\n".join(f"[HARNESS-GUARD]   {b}" for b in blocked)
+            + "\n[HARNESS-GUARD] All acceptance criteria must be honestly addressed in gen_report.md.\n"
+            "[HARNESS-GUARD] If an AC is not met, report it as a failure — do not rationalize it away."
+        )
+
+    info("[HARNESS-GUARD] Passed: Anti-rationalization check — all ACs addressed")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
@@ -992,6 +1159,9 @@ CHECKS = {
     "pre-push": check_pre_push,
     "post-edit-quality": check_post_edit_quality,
     "circuit-breaker": check_circuit_breaker,
+    "anti-rationalization": check_anti_rationalization,
+    "record-read": record_read_hash,
+    "stale-read-check": check_stale_read,
 }
 
 
