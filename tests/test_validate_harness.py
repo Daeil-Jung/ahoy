@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -799,6 +800,7 @@ def test_hooks_json_covers_all_expected_check_types():
         "pre-gen", "post-eval", "guard-eval-files",
         "audit-final-scope", "pre-commit", "pre-push",
         "post-edit-quality", "circuit-breaker",
+        "record-read", "stale-read-check",
     ]
     for check in expected_checks:
         assert check in combined, f"Missing hook check: {check}"
@@ -848,3 +850,94 @@ def test_circuit_breaker_archives_gen_report(monkeypatch: pytest.MonkeyPatch, tm
     archived = sprint_dir / "gen_report.md.attempt-2"
     assert archived.exists(), "gen_report.md should be archived as gen_report.md.attempt-2"
     assert archived.read_text(encoding="utf-8") == gen_content
+
+
+# ── Stale-read detection tests ────────────────────────────────
+
+
+def test_record_read_hash_stores_hash(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "example.py"
+    target.write_text("print('hello')", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(target)}))
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+
+    validate_harness.record_read_hash()
+
+    hashes = json.loads((harness_dir / ".read_hashes.json").read_text(encoding="utf-8"))
+    assert str(target) in hashes
+    expected_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+    assert hashes[str(target)] == expected_hash
+
+
+def test_stale_read_passes_when_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "example.py"
+    target.write_text("print('hello')", encoding="utf-8")
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(target)}))
+
+    validate_harness.record_read_hash()
+    validate_harness.check_stale_read()
+
+
+def test_stale_read_blocks_when_changed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "example.py"
+    target.write_text("print('hello')", encoding="utf-8")
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(target)}))
+
+    validate_harness.record_read_hash()
+    target.write_text("print('changed')", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_stale_read()
+
+
+def test_stale_read_allows_new_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+    new_file = tmp_path / "new_file.py"
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(new_file)}))
+
+    validate_harness.check_stale_read()
+
+
+def test_stale_read_warns_no_read_record(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "example.py"
+    target.write_text("print('hello')", encoding="utf-8")
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(target)}))
+
+    validate_harness.check_stale_read()
+
+    captured = capsys.readouterr()
+    assert "No Read recorded" in captured.err
+
+
+def test_stale_read_multiple_reads_uses_latest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    harness_dir = tmp_path / ".claude" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "example.py"
+    target.write_text("version1", encoding="utf-8")
+    monkeypatch.setattr(validate_harness, "_READ_HASH_FILE", harness_dir / ".read_hashes.json")
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps({"file_path": str(target)}))
+
+    validate_harness.record_read_hash()
+    target.write_text("version2", encoding="utf-8")
+    validate_harness.record_read_hash()
+
+    validate_harness.check_stale_read()
