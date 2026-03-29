@@ -806,7 +806,6 @@ def test_hooks_json_covers_all_expected_check_types():
         assert check in combined, f"Missing hook check: {check}"
 
 
-<<<<<<< HEAD
 # ── Stale-read detection tests ────────────────────────────────
 
 

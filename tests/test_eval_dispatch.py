@@ -843,7 +843,6 @@ def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.Monkey
     assert exit_code == 1
 
 
-<<<<<<< HEAD
 # ── v0.3.0 multi-dimensional evaluation perspectives tests ──────
 
 
