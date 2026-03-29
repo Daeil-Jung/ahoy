@@ -1029,26 +1029,32 @@ def main() -> int:
             verdicts[model_name] = result
             raw_responses[model_name] = raw
 
-    # --- Cost tracking: parse usage from each model response and update state ---
-    total_tokens_this_run = 0
-    prompt_tokens_estimate = len(prompt) // 4
-    for model_name, raw in raw_responses.items():
-        parsed_verdict = verdicts.get(model_name, {})
-        # Skip prompt token estimation for models that errored locally
-        # (e.g. CLI not found, timeout) — no tokens were actually sent.
-        is_local_error = (
-            parsed_verdict.get("verdict") == "error"
-            and "call failed" in parsed_verdict.get("summary", "")
-        )
-        usage = parse_usage(raw, parsed=parsed_verdict)
-        total_tokens_this_run += usage["output_tokens"]
-        if not is_local_error:
+    # --- Cost tracking helper ---
+    def _calc_round_tokens(
+        raw_responses: dict[str, str],
+        verdicts: dict[str, dict],
+        prompt_len: int,
+    ) -> int:
+        """Calculate total token usage for a single evaluation round."""
+        tokens = 0
+        estimate = prompt_len // 4
+        for model_name, raw in raw_responses.items():
+            parsed_verdict = verdicts.get(model_name, {})
+            is_local_error = (
+                parsed_verdict.get("verdict") == "error"
+                and "call failed" in parsed_verdict.get("summary", "")
+            )
+            if is_local_error:
+                continue
+            usage = parse_usage(raw, parsed=parsed_verdict)
+            tokens += usage["output_tokens"]
             if usage["input_tokens"] > 0:
-                # Model returned real usage data — use it directly
-                total_tokens_this_run += usage["input_tokens"]
+                tokens += usage["input_tokens"]
             else:
-                # No real input token data — use prompt-length estimate as fallback
-                total_tokens_this_run += prompt_tokens_estimate
+                tokens += estimate
+        return tokens
+
+    round1_tokens = _calc_round_tokens(raw_responses, verdicts, len(prompt))
 
     # Read the current sprint's attempt number from harness_state.json
     current_attempt = 0
@@ -1061,17 +1067,10 @@ def main() -> int:
     except (json.JSONDecodeError, OSError, FileNotFoundError):
         pass
 
-    update_cost_tracking(
-        harness_state_path,
-        eval_calls=len(models),
-        tokens=total_tokens_this_run,
-        sprint_id=sprint_dir.name,
-        attempt=current_attempt,
-    )
-
     round1_verdicts = dict(verdicts)
     evaluation_rounds = 1
     round2_verdicts: dict[str, dict] | None = None
+    round2_tokens = 0
 
     # --- Round 2 (only if verdicts conflict) ---
     if check_verdict_conflict(verdicts):
@@ -1079,12 +1078,16 @@ def main() -> int:
         print("[eval_dispatch] Round 1 verdicts conflict — starting Round 2 cross-verification", file=sys.stderr)
         round2_prompt = build_round2_prompt(prompt, round1_verdicts)
         round2_verdicts = {}
+        round2_raw: dict[str, str] = {}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
             futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
             for future in concurrent.futures.as_completed(futures):
                 model_name, result, _raw = future.result()
                 round2_verdicts[model_name] = result
+                round2_raw[model_name] = _raw
+
+        round2_tokens = _calc_round_tokens(round2_raw, round2_verdicts, len(round2_prompt))
 
         # Use round 2 verdicts only if quorum is maintained
         round2_valid = {k: v for k, v in round2_verdicts.items() if v.get("verdict") != "error"}
@@ -1094,6 +1097,17 @@ def main() -> int:
             print(f"[eval_dispatch] Round 2 quorum lost ({len(round2_valid)} valid < {args.min_models} required), using round 1 results", file=sys.stderr)
     else:
         print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
+
+    # Persist cost tracking for all rounds
+    total_eval_calls = len(models) * evaluation_rounds
+    total_tokens_this_run = round1_tokens + round2_tokens
+    update_cost_tracking(
+        harness_state_path,
+        eval_calls=total_eval_calls,
+        tokens=total_tokens_this_run,
+        sprint_id=sprint_dir.name,
+        attempt=current_attempt,
+    )
 
     # Compute consensus (pass known criteria from contract for missing-criterion detection)
     known_criteria = parse_acceptance_criteria(contract)
