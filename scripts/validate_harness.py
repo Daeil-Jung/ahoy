@@ -264,11 +264,12 @@ def record_read_hash() -> None:
     file_path = tool_input.get("file_path", "")
     if not file_path:
         return
-    resolved = Path(file_path)
+    resolved = Path(file_path).resolve()
     if not resolved.is_file():
         return
+    canonical_key = str(resolved)
     hashes = _load_read_hashes()
-    hashes[str(resolved)] = _file_hash(resolved)
+    hashes[canonical_key] = _file_hash(resolved)
     _save_read_hashes(hashes)
 
 
@@ -284,11 +285,12 @@ def check_stale_read() -> None:
     file_path = tool_input.get("file_path", "")
     if not file_path:
         return
-    resolved = Path(file_path)
+    resolved = Path(file_path).resolve()
     if not resolved.is_file():
         return  # New file creation — no hash to compare
+    canonical_key = str(resolved)
     hashes = _load_read_hashes()
-    stored_hash = hashes.get(str(resolved))
+    stored_hash = hashes.get(canonical_key)
     if stored_hash is None:
         print(f"[HARNESS-WARN] No Read recorded for {file_path} — proceeding without stale check", file=sys.stderr)
         return
@@ -1083,7 +1085,7 @@ def check_anti_rationalization() -> None:
     ac_ids: list[str] = []
     for line in contract_text.splitlines():
         stripped = line.strip()
-        match = re.match(r"^[-*]\s+\[?\s*(AC-\d+)", stripped)
+        match = re.match(r"^[-*]\s+(?:\[.?\]\s*)?(?:\*\*\s*)?(AC-\d+)", stripped)
         if match:
             ac_ids.append(match.group(1))
 
@@ -1100,20 +1102,21 @@ def check_anti_rationalization() -> None:
     except json.JSONDecodeError:
         return
 
-    # Reconstruct the post-edit file state
-    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
-
-    # For Write tool: content IS the full file
-    # For Edit tool: reconstruct by applying old_string->new_string on disk content
     new_string = tool_input.get("new_string", "")
     old_string = tool_input.get("old_string", "")
     write_content = tool_input.get("content", "")
 
+    if not new_string and not write_content:
+        return
+
+    # Reconstruct post-edit file state:
+    # - Write tool: content IS the full file
+    # - Edit tool: apply old_string->new_string on disk content
+    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
+
     if write_content:
-        # Write tool — content is the complete file
         post_edit_content = write_content
     elif new_string and gen_report_path.exists():
-        # Edit tool — reconstruct post-edit state
         try:
             disk_content = gen_report_path.read_text(encoding="utf-8")
             if old_string:

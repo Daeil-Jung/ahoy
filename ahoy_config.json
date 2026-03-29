@@ -1,5 +1,8 @@
 {
-  "eval_models": ["codex", "gemini"],
+  "eval_models": [
+    "codex",
+    "gemini"
+  ],
   "min_models": 2,
   "eval_perspectives": {
     "codex": "accuracy_coverage",
@@ -8,5 +11,9 @@
   "cost_limit": {
     "max_eval_calls": 100,
     "max_tokens": 500000
+  },
+  "sensitive_data_masking": {
+    "enabled": true,
+    "extra_patterns": []
   }
 }

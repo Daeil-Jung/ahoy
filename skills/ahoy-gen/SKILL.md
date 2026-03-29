@@ -46,11 +46,11 @@ Explain progress to the user in natural language during implementation.
 
 Fixing issues found by external models.
 
-**Issues to fix** (by severity):
-| ID | Severity | Found By | Description | Fix Direction | Suggestion |
-|----|----------|----------|-------------|---------------|------------|
-| ISS-001 | blocker | codex | ... | ... | (concrete fix guidance) |
-| ISS-002 | major | claude | ... | ... | (concrete fix guidance) |
+**Issues to fix** (by priority):
+| ID | Priority | Severity | Found By | Description | Fix Direction | Suggestion |
+|----|----------|----------|----------|-------------|---------------|------------|
+| ISS-001 | P0 | blocker | codex | ... | ... | (concrete fix guidance) |
+| ISS-002 | P2 | major | claude | ... | ... | (concrete fix guidance) |
 
 Starting fixes...
 ```
@@ -119,9 +119,23 @@ Starting fixes...
 
 If `issues.json` exists:
 1. Read each issue and reference the `suggested_fix` and `suggestion` fields — `suggestion` contains concrete direction on which file, which section, and how to change it; use it as primary guidance for fixing
-2. Prioritize by severity: blocker > major > minor
+2. Prioritize by priority level: P0 (blocker) > P1 (critical) > P2 (major) > P3 (minor)
+3. **P0/P1 issues must be resolved first** — do not proceed to P2/P3 until all P0/P1 are addressed
 4. Check the `found_by` field to identify which external model found the issue
 5. If an issue cannot be fixed, record the reason in gen_report.md
+
+### Rework Strategy Diversification (attempt >= 2)
+
+When the current attempt is 2 or higher, an **Avoidance Patterns** section will be prepended to this prompt by the orchestrator. This section contains:
+- Previous implementation approaches that were tried
+- The specific issues that caused each approach to fail
+- A directive to use a fundamentally different strategy
+
+**You MUST**:
+1. Read the Avoidance Patterns section carefully
+2. Choose an implementation strategy that differs from all listed failed approaches
+3. In your gen_report.md, explicitly state how your approach differs
+4. Do NOT repeat the same algorithm, data structure, or pattern that previously failed
 
 ## Test Execution
 
