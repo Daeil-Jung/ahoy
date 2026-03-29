@@ -6,15 +6,19 @@ Supports extended verification: test_command, lint_command, type_check_command, 
 
 Usage: validate_harness.py <check_type>
   check_type:
-    scope-check      — Before Edit/Write: verify target file is within contract.md Implementation Scope
-    pre-state-write  — Before writing harness_state.json: verify external evaluation exists before leaving generated
-    post-state-write — After writing harness_state.json: verify status=passed <-> status_action consistency
-    pre-gen          — Before Generator execution: verify contract.md exists
-    post-eval        — After evaluation: verify external model verdict in issues.json
-    guard-eval-files — Block direct writing of issues.json (only eval_dispatch.py allowed)
-    pre-commit       — Run tests, lint, and type check before commit (only in harness mode)
-    pre-push         — Run tests, lint, type check + verify state consistency before push
+    scope-check          — Before Edit/Write: verify target file is within contract.md Implementation Scope
+    pre-state-write      — Before writing harness_state.json: verify external evaluation exists before leaving generated
+    post-state-write     — After writing harness_state.json: verify status=passed <-> status_action consistency
+    pre-gen              — Before Generator execution: verify contract.md exists
+    post-eval            — After evaluation: verify external model verdict in issues.json
+    guard-eval-files     — Block direct writing of issues.json (only eval_dispatch.py allowed)
+    audit-final-scope    — Before generated transition: verify all modified files are within contract scope
+    pre-commit           — Run tests, lint, and type check before commit (only in harness mode)
+    pre-push             — Run tests, lint, type check + verify state consistency before push
+    post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
+    circuit-breaker      — Detect repeated failure patterns across rework attempts
 """
+from __future__ import annotations
 
 import json
 import os
@@ -219,6 +223,171 @@ def info(msg: str) -> None:
     print(msg)
 
 
+# ── Failure pattern detection (circuit breaker) ────────────────
+
+
+_FAILURE_PATTERNS: dict[str, list[str]] = {
+    "scope_violation": ["scope", "out of scope", "outside", "not in contract"],
+    "test_failure": ["test", "assert", "expect", "fail"],
+    "stub_remaining": ["stub", "todo", "not implemented", "placeholder", "fixme"],
+    "type_error": ["type", "typeerror", "typing", "annotation", "incompatible"],
+    "logic_error": ["logic", "incorrect", "wrong", "bug", "regression"],
+}
+
+
+def classify_failure_type(issues: list[dict]) -> list[str]:
+    """Classify each issue into a failure pattern category.
+
+    Inspects the ``category`` and ``description`` fields of each issue dict
+    and returns a list of matched pattern labels.
+    """
+    matched: list[str] = []
+    for issue in issues:
+        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
+        for label, keywords in _FAILURE_PATTERNS.items():
+            if any(kw in text for kw in keywords):
+                matched.append(label)
+                break
+        else:
+            matched.append("other")
+    return matched
+
+
+def _issues_signature(issues: list[dict]) -> set[str]:
+    """Build a set of comparable signatures from issue dicts.
+
+    Uses ``(category, description)`` as the identity key so that two
+    issues with the same category and description are considered identical.
+    """
+    return {
+        f"{issue.get('category', '').strip().lower()}::{issue.get('description', '').strip().lower()}"
+        for issue in issues
+    }
+
+
+def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
+    """Load issues from a specific attempt backup file.
+
+    The convention is ``issues.json.attempt-N`` for archived attempts, while
+    ``issues.json`` always holds the *current* attempt.
+
+    Returns an empty list when no backup file exists — falling back to the
+    current ``issues.json`` would cause self-comparison and false circuit
+    breaks.
+    """
+    attempt_path = sprint_dir / f"issues.json.attempt-{attempt}"
+    if attempt_path.exists():
+        data = load_json(attempt_path)
+        if data and isinstance(data.get("issues"), list):
+            return data["issues"]
+
+    print(
+        f"[validate_harness] No previous attempt issues found at {attempt_path}, "
+        f"skipping circuit breaker comparison",
+        file=sys.stderr,
+    )
+    return []
+
+
+def detect_failure_pattern(sprint_dir: Path, current_attempt: int) -> dict:
+    """Compare current and previous attempt issues for repeated failures.
+
+    Returns a dict with at least ``circuit_break`` (bool).  When True, the
+    dict also contains ``repeated_issues`` and ``recommendation``.
+    """
+    if current_attempt < 2:
+        return {"circuit_break": False}
+
+    # Load current issues
+    current_file = sprint_dir / "issues.json"
+    current_data = load_json(current_file)
+    if not current_data or not isinstance(current_data.get("issues"), list):
+        return {"circuit_break": False}
+    current_issues: list[dict] = current_data["issues"]
+
+    # Load previous attempt issues
+    prev_issues = _load_attempt_issues(sprint_dir, current_attempt - 1)
+    if not prev_issues:
+        return {"circuit_break": False}
+
+    current_sigs = _issues_signature(current_issues)
+    prev_sigs = _issues_signature(prev_issues)
+
+    repeated = current_sigs & prev_sigs
+    if not repeated:
+        return {"circuit_break": False}
+
+    # Build human-readable repeated issue list
+    repeated_descriptions = [sig.split("::", 1)[-1] for sig in repeated]
+    failure_types = classify_failure_type(current_issues)
+
+    return {
+        "circuit_break": True,
+        "repeated_issues": sorted(repeated_descriptions),
+        "failure_types": sorted(set(failure_types)),
+        "recommendation": "failed",
+    }
+
+
+def check_circuit_breaker() -> None:
+    """Detect repeated failure patterns across rework attempts.
+
+    This check runs after evaluation.  If the same issues appear in two
+    consecutive attempts it blocks the transition via ``fail()`` and outputs
+    the failure pattern as structured JSON to stdout so the orchestrator can
+    read and persist it.
+
+    ``validate_harness.py`` must NOT write ``harness_state.json`` directly —
+    state writes are the orchestrator's responsibility.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    if not current_sprint:
+        return
+
+    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+
+    # Skip circuit breaker if the current evaluation passed
+    current_issues = load_json(sprint_dir / "issues.json")
+    if current_issues and current_issues.get("status_action") == "passed":
+        print("[validate_harness] Circuit breaker skipped — status_action is passed", file=sys.stderr)
+        return
+
+    idx = state.get("current_sprint_index", 0)
+    sprint_obj = state["sprints"][idx]
+    current_attempt = sprint_obj.get("attempt", 0)
+
+    # Archive current issues.json as issues.json.attempt-{N} before comparison.
+    # This makes the current attempt's issues available for the NEXT rework cycle.
+    issues_file = sprint_dir / "issues.json"
+    if issues_file.exists() and current_attempt >= 1:
+        backup_path = sprint_dir / f"issues.json.attempt-{current_attempt}"
+        if not backup_path.exists():
+            shutil.copy2(issues_file, backup_path)
+            print(
+                f"[validate_harness] Archived {issues_file.name} as {backup_path.name}",
+                file=sys.stderr,
+            )
+
+    pattern = detect_failure_pattern(sprint_dir, current_attempt)
+
+    # Output the pattern as structured JSON so the orchestrator can persist it
+    print(json.dumps({"circuit_breaker_result": pattern}))
+
+    if pattern.get("circuit_break"):
+        repeated = pattern.get("repeated_issues", [])
+        ftypes = pattern.get("failure_types", [])
+        fail(
+            "[HARNESS-GUARD] Blocked: Circuit breaker triggered — repeated failure pattern detected\n"
+            f"[HARNESS-GUARD]   Repeated issues: {', '.join(repeated)}\n"
+            f"[HARNESS-GUARD]   Failure types: {', '.join(ftypes)}\n"
+            "[HARNESS-GUARD]   Recommendation: mark sprint as 'failed' instead of continuing rework.\n"
+            "[HARNESS-GUARD]   The same issues have appeared in consecutive attempts — further rework is unlikely to help."
+        )
+    else:
+        info("[HARNESS-GUARD] Passed: No repeated failure pattern detected")
+
+
 # ── Check handlers ──────────────────────────────────────────────
 
 
@@ -421,6 +590,18 @@ def check_pre_push() -> None:
     info("[HARNESS-GUARD] Passed: Harness state consistency confirmed — push allowed")
 
 
+def _path_matches_scope_entry(file_path: str, scope_entry: str) -> bool:
+    """Check whether *file_path* matches a single scope entry.
+
+    Both values must already be forward-slash normalised.
+    """
+    return (
+        file_path == scope_entry
+        or file_path.endswith("/" + scope_entry)
+        or scope_entry in file_path
+    )
+
+
 def parse_scope_from_contract(contract_path: Path) -> tuple[list[str], list[str], list[str]]:
     """Parse Implementation Scope from contract.md.
 
@@ -511,8 +692,7 @@ def check_scope() -> None:
 
     # Files to Preserve are explicitly blocked
     for p in preserve:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             fail(
                 f"[HARNESS-GUARD] Blocked: '{file_path}' is listed in Files to Preserve\n"
                 "[HARNESS-GUARD] This file is protected by the sprint contract and must not be modified."
@@ -524,8 +704,7 @@ def check_scope() -> None:
         return  # No scope defined, pass through
 
     for p in allowed:
-        p_normalized = p.replace("\\", "/")
-        if file_path_normalized.endswith(p_normalized) or p_normalized in file_path_normalized:
+        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
             return  # File is in scope
 
     # Check if file is part of the AHOY plugin itself — always allow
@@ -542,6 +721,250 @@ def check_scope() -> None:
     )
 
 
+def audit_final_scope() -> None:
+    """Audit all modified files against contract scope before generated transition.
+
+    Complements check_scope() (per-file Edit/Write guard) by scanning the full
+    git diff at state-transition time so nothing slips through.
+    """
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    current_status = get_current_status(state)
+
+    if not current_sprint:
+        return  # No active sprint
+    if current_status != "generated":
+        return  # Only audit on transitions from generated state
+
+    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
+    if not contract_path.exists():
+        return  # No contract yet
+
+    create, modify, preserve = parse_scope_from_contract(contract_path)
+    allowed = create + modify
+    if not allowed and not preserve:
+        return  # No scope defined, pass through
+
+    # Check if HEAD exists (fresh repos have no commits)
+    head_check = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head_check.returncode != 0:
+        print("[validate_harness] audit_final_scope: HEAD not found (unborn repo), skipping scope audit", file=sys.stderr)
+        return
+
+    # Collect changed files via git diff against HEAD
+    git_commands = [
+        ("git diff", ["git", "diff", "--name-only", "HEAD"]),
+        ("git diff --cached", ["git", "diff", "--name-only", "--cached"]),
+    ]
+
+    outputs: list[str] = []
+    for label, cmd in git_commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as exc:
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label}: {exc}) "
+                "— cannot verify file changes, blocking transition"
+            )
+            return  # unreachable; helps static analysis see proc is always bound
+        if proc.returncode != 0:
+            stderr_hint = (proc.stderr or "").strip()[:200]
+            fail(
+                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label} exited {proc.returncode}"
+                f"{': ' + stderr_hint if stderr_hint else ''}) "
+                "— cannot verify file changes, blocking transition"
+            )
+        outputs.append(proc.stdout)
+
+    changed_files: set[str] = set()
+    for output in outputs:
+        for line in output.strip().splitlines():
+            stripped = line.strip()
+            if stripped:
+                changed_files.add(stripped.replace("\\", "/"))
+
+    # Filter out harness-internal files and plugin-root files — always allowed
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    plugin_root_rel = ""
+    if plugin_root:
+        try:
+            plugin_root_rel = str(Path(plugin_root).resolve().relative_to(Path.cwd().resolve())).replace("\\", "/")
+        except ValueError:
+            # Plugin root is outside the repo — use absolute path normalized
+            plugin_root_rel = plugin_root.replace("\\", "/")
+    user_changed = [
+        f for f in sorted(changed_files)
+        if not f.startswith(".claude/harness/")
+        and not (plugin_root_rel and (f.startswith(plugin_root_rel + "/") or f.startswith(plugin_root_rel)))
+    ]
+
+    # Check preserved files for unauthorized modifications
+    preserved_violations = [
+        f for f in user_changed
+        if any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in preserve)
+    ]
+
+    if preserved_violations:
+        fail(
+            "[HARNESS-GUARD] Blocked: Files to Preserve were modified:\n"
+            + "\n".join(f"  - {f}" for f in preserved_violations)
+            + "\n[HARNESS-GUARD] These files are protected by the sprint contract and must not be modified.\n"
+            "[HARNESS-GUARD] Revert changes to preserved files before transitioning."
+        )
+
+    # Check for files outside the allowed scope (create + modify)
+    out_of_scope: list[str] = []
+    if allowed:
+        out_of_scope = [
+            f for f in user_changed
+            if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed)
+        ]
+
+    if out_of_scope:
+        fail(
+            "[HARNESS-GUARD] Blocked: Intent-Action mismatch — files outside contract scope were modified:\n"
+            + "\n".join(f"  - {f}" for f in out_of_scope)
+            + f"\n[HARNESS-GUARD] Allowed scope: {', '.join(allowed)}\n"
+            "[HARNESS-GUARD] Revert out-of-scope changes or update the contract before transitioning to generated."
+        )
+
+    info("[HARNESS-GUARD] Passed: All modified files are within contract scope")
+
+
+# ── Post-edit quality patterns ─────────────────────────────────
+
+_TEST_FILE_PATTERNS = (
+    "test_",
+    "_test.py",
+    "/tests/",
+    "/__tests__/",
+    ".test.",
+    ".spec.",
+)
+
+_MARKER_PATTERN = re.compile(
+    r"\b(TODO|FIXME|HACK|XXX)\b",
+)
+
+_STUB_PATTERNS = [
+    re.compile(r"^\s*pass\s*$"),
+    re.compile(r"^\s*\.\.\.\s*$"),
+    re.compile(r"""throw\s+new\s+Error\s*\(\s*["']not implemented["']\s*\)""", re.IGNORECASE),
+    re.compile(r"""raise\s+NotImplementedError"""),
+]
+
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\b(lorem|foo|bar|baz|test123|placeholder)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Return True if *file_path* (forward-slash normalized) looks like a test file."""
+    # Ensure a leading slash so directory patterns like "/tests/" match relative paths
+    normalized = "/" + file_path.lstrip("/")
+    return any(pat in normalized for pat in _TEST_FILE_PATTERNS)
+
+
+def _load_allowlist() -> set[str]:
+    """Load allowed patterns from .ahoy-allowlist (one pattern per line)."""
+    allowlist: set[str] = set()
+    allowlist_path = Path(".ahoy-allowlist")
+    if allowlist_path.exists():
+        for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                allowlist.add(line)
+    return allowlist
+
+
+def _line_allowed(line: str, allowlist: set[str]) -> bool:
+    """Return True if *line* matches any entry in the allowlist."""
+    return any(entry in line for entry in allowlist)
+
+
+def check_post_edit_quality() -> None:
+    """Detect TODO/FIXME/stub/placeholder patterns injected by Edit/Write."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+
+    # Normalize path separators for consistent matching
+    file_path_normalized = file_path.replace("\\", "/")
+
+    # Skip test files — patterns like TODO/placeholder are acceptable there
+    if _is_test_file(file_path_normalized):
+        return
+
+    # Skip non-text / binary-likely extensions
+    text_extensions = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
+        ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+        ".kt", ".scala", ".sh", ".bash", ".zsh", ".ps1",
+        ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css",
+        ".md", ".txt", ".cfg", ".ini", ".env", ".sql",
+    }
+    ext = Path(file_path).suffix.lower()
+    if ext and ext not in text_extensions:
+        return
+
+    # Scan only the content being written — not the entire file on disk.
+    # For Edit tool: inspect new_string; for Write tool: inspect content.
+    content = tool_input.get("new_string") or tool_input.get("content") or ""
+    if not content:
+        return
+
+    allowlist = _load_allowlist()
+    violations: list[str] = []
+
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if _line_allowed(line, allowlist):
+            continue
+
+        # Check TODO/FIXME/HACK/XXX markers
+        marker_match = _MARKER_PATTERN.search(line)
+        if marker_match:
+            violations.append(f"  L{lineno}: {marker_match.group()} marker — {line.strip()}")
+            continue
+
+        # Check stub-only implementations
+        for stub_re in _STUB_PATTERNS:
+            if stub_re.search(line):
+                violations.append(f"  L{lineno}: stub pattern — {line.strip()}")
+                break
+        else:
+            # Check placeholder strings
+            ph_match = _PLACEHOLDER_PATTERN.search(line)
+            if ph_match:
+                violations.append(f"  L{lineno}: placeholder '{ph_match.group()}' — {line.strip()}")
+
+    if violations:
+        detail = "\n".join(violations[:20])  # cap output length
+        extra = ""
+        if len(violations) > 20:
+            extra = f"\n  ... and {len(violations) - 20} more"
+        fail(
+            f"[HARNESS-GUARD] Blocked: Quality issues detected in '{file_path}':\n"
+            f"{detail}{extra}\n"
+            "[HARNESS-GUARD] Remove TODO/FIXME markers, stubs, and placeholders before saving.\n"
+            "[HARNESS-GUARD] If intentional, add the pattern to .ahoy-allowlist."
+        )
+
+    info(f"[HARNESS-GUARD] Passed: Post-edit quality check — '{file_path}'")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 CHECKS = {
@@ -551,8 +974,11 @@ CHECKS = {
     "pre-gen": check_pre_gen,
     "post-eval": check_post_eval,
     "guard-eval-files": check_guard_eval_files,
+    "audit-final-scope": audit_final_scope,
     "pre-commit": check_pre_commit,
     "pre-push": check_pre_push,
+    "post-edit-quality": check_post_edit_quality,
+    "circuit-breaker": check_circuit_breaker,
 }
 
 
