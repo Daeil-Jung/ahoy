@@ -1,6 +1,6 @@
 # AHOY 하네스 리서치 누적 요약
 
-> 마지막 업데이트: 2026-03-29 (13차 — 전체 repo 재분석 + v0.2.0 코드 대조)
+> 마지막 업데이트: 2026-03-29 (13차 — 전체 repo 스타 재조회, 구현 완료 항목은 개별 리포트에 반영)
 
 ## 분석 완료 프로젝트
 
@@ -22,8 +22,8 @@
 | NeMo Guardrails | 5.9k | [리포트](nemo-guardrails-report.md) | Colang DSL, 5종 레일 체계, 비동기 우선, 서버 모드, LangChain 통합 |
 | Agent Orchestrator | 5.6k | [리포트](agent-orchestrator-report.md) | 플러그인 아키텍처, git worktree 격리, CI 피드백 |
 | GitHub Agentic Workflows | 4.2k | [리포트](github-agentic-workflows-report.md) | Safe Outputs, 3계층 보안, 컴파일 타임 검증, MCP Gateway, 위협 감지 |
-| EvoAgentX (EvoFSM) | 2.7k | [리포트](evoagentx-report.md) | 자기진화 FSM, Flow-Skill 분리, Critic 가이드 진화, 궤적 메모리, MCTS |
 | Oh-My-Codex | 2.8k | [리포트](oh-my-codex-report.md) | 스마트 에스컬레이션, 역할 프롬프트, Deep Interview, Team 병렬 실행 |
+| EvoAgentX (EvoFSM) | 2.7k | [리포트](evoagentx-report.md) | 자기진화 FSM, Flow-Skill 분리, Critic 가이드 진화, 궤적 메모리, MCTS |
 | oh-my-pi | 2.4k | [리포트](oh-my-pi-report.md) | Hash-Anchored Edits, LSP 통합, 6 서브에이전트, P0-P3 Reviewer |
 | Claude Octopus | 2.2k | [리포트](claude-octopus-report.md) | 8 프로바이더, Double Diamond, 75% 컨센서스, Reaction Engine |
 | Snyk Agent Scan | 2.0k | [리포트](snyk-agent-scan-report.md) | MCP 보안 스캔, Tool Poisoning/Shadowing, 공급망 보안, 멀티 플랫폼 |
@@ -55,10 +55,10 @@
 | Adversarial Review | 4 | [리포트](adversarial-review-report.md) | 4단계 적대적 토론, Claude+Codex 교차 리뷰, 서킷 브레이커, 신뢰도 등급 |
 | Atlas Guardrails | 3 | [리포트](atlas-guardrails-report.md) | 심볼 인덱싱, 컨텍스트 패킹, 중복 방지, API Drift Detection, MCP 서버 |
 | Agent Eval Harness | 2 | [리포트](agent-eval-harness-report.md) | Unix 파이프라인, pass@k, 궤적 캡처, Git 그레이딩, 스키마 어댑터 |
+| coding-agent-eval | 0 | [리포트](coding-agent-eval-report.md) | 다중 CLI 에이전트 벤치마크, 자동 테스트 감지, HTML 리포트 |
 | The Star Chamber | - | [리포트](star-chamber-report.md) | Multi-LLM 컨센서스, Debate Mode, 3단계 분류 |
 | AgentSpec | - | [리포트](agentspec-report.md) | 런타임 강제 DSL, 다중 강제 메커니즘, 규칙 충돌 감지 |
 | SentinelOne Gauntlet | - | [리포트](sentinelone-gauntlet-report.md) | 3단계 파이프라인, Active Rejection Mandate, 역순 재검증, 결정론적 브릿지 |
-| coding-agent-eval | 0 | [리포트](coding-agent-eval-report.md) | 다중 CLI 에이전트 벤치마크, 자동 테스트 감지, HTML 리포트 |
 
 > 총 **54개 프로젝트** 분석 완료 (스타 합계: 약 630k+)
 
@@ -67,135 +67,15 @@
 | 프로젝트 | 스타 | 사유 |
 |----------|------|------|
 | bigcode-evaluation-harness | 1,024 | 코드 생성 LM 평가, HumanEval/MBPP/APPS — 코딩 에이전트가 아닌 LM 벤치마크 |
-| lasso-security/claude-hooks | 184 | PostToolUse 인젝션 감지, 보안 통합 — 13차에서 발견 |
+| lasso-security/claude-hooks | 184 | PostToolUse 인젝션 감지, 보안 통합 |
 | vaporif/parry-guard | 27 | Rust DeBERTa/Llama 프롬프트 인젝션 스캐너, Claude Code Hook |
 | mafiaguy/claude-security-guardrails | - | dwarvesf와 유사, 우선순위 낮음 |
 
 ---
 
-## AHOY 핵심 강점 (v0.2.0 코드 검증 완료)
+## 개선 제안 (미구현 항목만)
 
-54개 프로젝트 분석 + 실제 코드베이스 대조를 통해 확인된 경쟁 우위. **문서상 주장이 아니라 코드로 검증된** 강점.
-
-### 1. issues.json 파일 소유권 분리 — 54개 프로젝트 중 유일
-
-```
-hooks/hooks.json → validate_harness.py guard-eval-files → exit 1 (무조건 차단)
-eval_dispatch.py write_result()만 issues.json 기록 가능
-```
-
-Claude의 Write/Edit 호출 자체를 셸 수준에서 차단. Aragora의 Trickster나 Liza의 Go 감독자도 **파일 수준 소유권 분리**까지는 하지 않는다.
-
-### 2. Generator 의견 기계적 제거 — 54개 프로젝트 중 유일
-
-```python
-# eval_dispatch.py:33-89
-strip_generator_opinions(gen_report)  # regex로 "pass", "satisfied" 등 주관적 판단 사전 제거
-```
-
-의견이 평가자에게 도달하기 전에 제거하므로 영향 자체를 원천 차단.
-
-### 3. any fail → final fail + 최소 2모델 — 결정론적 컨센서스
-
-```python
-# eval_dispatch.py — compute_consensus()
-# Any fail -> final fail, valid models < 2 -> error
-# validate_harness.py — check_post_eval()
-if valid_count < 2: fail("minimum 2 required")
-```
-
-Claude Octopus의 75% 합의나 Aragora의 4종 컨센서스 모드보다 엄격.
-
-### 4. passed 상태 자동 롤백
-
-post-state-write Hook에서 passed ↔ verdict 불일치 시 `.bak`에서 **자동 복원**. 대부분의 프로젝트가 소프트 가드레일(경고, 로그)인 것과 대비.
-
-### 5. 서브프로세스 수준 평가 격리
-
-eval_dispatch.py가 **완전히 별도 프로세스**로 실행. wshobson/agents(32.5k), Deep Agents(18k), Hive(9.9k) 모두 동일 프레임워크 내 에이전트 수준 격리이며 물리적 프로세스 분리 없음.
-
-### 6. (v0.2.0 신규) 11개 Hook 강제 체계
-
-`scope-check`, `pre-state-write`, `post-state-write`, `pre-gen`, `post-eval`, `guard-eval-files`, `audit-final-scope`, `pre-commit`, `pre-push`, `post-edit-quality`, `circuit-breaker` — 54개 프로젝트 중 가장 포괄적인 Hook 커버리지.
-
-### 7. (v0.2.0 신규) 108개 테스트 + 86.87% 커버리지
-
-pytest 기반 단위/E2E 통합 테스트. eval_dispatch → issues.json → validate_harness 크로스 모듈 흐름 검증. CI에서 자동 실행.
-
----
-
-## 코드-문서 갭 분석 (v0.2.0 코드 재대조)
-
-### RESOLVED-1. 스코프 잠금 — 해소됨
-
-- `validate_harness.py:check_scope()` — 개별 Edit/Write 파일 단위 차단
-- `validate_harness.py:audit_final_scope()` — generated 전이 시 전체 git diff 대조 (v0.2.0 추가)
-
-### RESOLVED-2. 실행 기반 검증 (lint/coverage/type-check) — 해소됨
-
-- `pre-commit`/`pre-push` Hook에서 test, lint, type-check, coverage 자동 실행
-
-### RESOLVED-3. Intent-Action Mismatch 검증 — v0.2.0에서 해소
-
-- `audit_final_scope()` 추가 — contract scope vs 실제 수정 파일 목록 사후 대조
-- preserved 파일 수정 차단, harness/plugin-root 파일 자동 허용
-
-### RESOLVED-4. Post-edit 품질 가드 — v0.2.0에서 해소
-
-- `check_post_edit_quality()` 추가 — TODO/FIXME/stub/placeholder 패턴 자동 탐지
-- `.ahoy-allowlist` 기반 예외 처리, 테스트 파일/바이너리 자동 건너뛰기
-
-### RESOLVED-5. 강제 반박 + Active Rejection — v0.2.0에서 해소
-
-- `build_eval_prompt()` — "반드시 1개 이상 objection" 강제, "pass 기본값 금지" 지시
-- `validate_objections()` — objections 필드 검증 및 정규화
-
-### RESOLVED-6. G-Eval CoT 구조화 — v0.2.0에서 해소
-
-- 평가 프롬프트에 4단계 Chain-of-Thought 강제 삽입 (Code Understanding → AC Verification → Quality Assessment → Final Verdict)
-- `reasoning_chain` 필드로 추론 과정 추적
-
-### RESOLVED-7. 방향성 피드백 — v0.2.0에서 해소
-
-- `suggestion` 필드 추가 — 구체적 파일/위치/수정 방향 포함
-- consensus merge 시 suggestion 보존 검증 완료
-
-### RESOLVED-8. 수렴도 정량화 — v0.2.0에서 해소
-
-- `_merge_criteria_results()` — per-AC pass/fail + convergence_ratio 산출
-- `_record_convergence()` — harness_state.json에 convergence_history 기록
-
-### RESOLVED-9. 교차 비판 평가 (2-Round) — v0.2.0에서 해소
-
-- verdict conflict 감지 → Round 2 교차 검증 자동 실행
-- Round 2 쿼럼 유지 검증, budget gate 적용
-
-### RESOLVED-10. 서킷 브레이커 — v0.2.0에서 해소
-
-- `detect_failure_pattern()` — 연속 시도 간 반복 이슈 탐지
-- `check_circuit_breaker()` — post-eval Hook에서 자동 실행
-
-### RESOLVED-11. 비용 추적 및 중단 — v0.2.0에서 해소
-
-- `update_cost_tracking()` / `check_cost_limit()` — eval_calls + tokens 누적 추적
-- Round 1/Round 2 별도 비용 기록, budget gate로 초과 방지
-- local error synthetic token 제외
-
-### 남은 GAP
-
-| ID | 내용 | 상태 |
-|----|------|------|
-| GAP-A | Anti-Rationalization Gate (Generator 자기합리화 방어) | 미구현 |
-| GAP-B | Stale-Read 감지 (파일 해시 비교) | 미구현 |
-| GAP-C | 공허 합의 감지 (rolling pass rate + 근거 유사도) | 미구현 |
-| GAP-D | Delta Contract (rework 시 통과 항목 스킵) | 미구현 |
-| GAP-E | 민감 데이터 마스킹 (외부 모델 전송 전 credential 치환) | 미구현 |
-
----
-
-## AHOY 개선 제안 (v0.2.0 이후)
-
-> v0.2.0에서 Tier 1, Tier 2 대부분, Tier 3, Tier 4 일부가 구현됨. 남은 항목만 재정리.
+> 구현 완료된 제안은 해당 리포트에 `v0.2.0 구현 완료` 태그로 반영됨. 아래는 **아직 미구현인 항목**만 수록.
 
 ### Tier 1: 즉시 구현 가능 (프롬프트/Hook 수준)
 
@@ -211,7 +91,7 @@ pytest 기반 단위/E2E 통합 테스트. eval_dispatch → issues.json → val
 
 | ID | 에픽 | 내용 | 출처 |
 |----|------|------|------|
-| T2-1 | **공허 합의 감지** | 모든 모델 pass + 이슈 0개 + 근거 유사도 85%↑ 시 자동 재평가 | Aragora, duh |
+| T2-1 | **공허 합의 감지** | 모든 모델 pass + 이슈 0개 + 근거 유사도 85%+ 시 자동 재평가 | Aragora, duh |
 | T2-2 | **민감 데이터 마스킹** | 외부 평가 모델 전송 전 API키/credential 자동 치환 | OpenGuardrails, Snyk |
 | T2-3 | **스프린트 체크포인트 복구** | API 크래시/세션 종료 시 자동 복원 확장 | Hive |
 
@@ -234,29 +114,7 @@ pytest 기반 단위/E2E 통합 테스트. eval_dispatch → issues.json → val
 
 ---
 
-## v0.2.0 구현 완료 추적
-
-| 기존 제안 ID | 내용 | 구현 위치 | 상태 |
-|-------------|------|-----------|------|
-| T1-1 (구) | Intent-Action Mismatch 검증 | `validate_harness.py:audit_final_scope()` | **완료** |
-| T1-2 (구) | 코드→주석 대체 감지 | `validate_harness.py:check_post_edit_quality()` | **완료** |
-| T2-1 (구) | 강제 반박 + Active Rejection | `eval_dispatch.py:build_eval_prompt()` | **완료** |
-| T2-2 (구) | G-Eval CoT 구조화 | `eval_dispatch.py:build_eval_prompt()` (4단계 CoT) | **완료** |
-| T2-3 (구) | 방향성 피드백 스키마 | `eval_dispatch.py` (suggestion 필드) | **완료** |
-| T2-4 (구) | 수렴도 정량화 | `eval_dispatch.py:_merge_criteria_results()` | **완료** |
-| T3-1 (구) | 교차 비판 평가 | `eval_dispatch.py:build_round2_prompt()` (2-Round) | **완료** |
-| T4-1 (구) | 루프 감지 + 서킷 브레이커 | `validate_harness.py:detect_failure_pattern()` | **완료** |
-| T6-4 (구) | 평가 비용 자동 추적 | `eval_dispatch.py:update_cost_tracking()` | **완료** |
-| - | Pytest 테스트 인프라 | `tests/` (108개 테스트, 86.87% 커버리지) | **완료** |
-| - | CI 파이프라인 | `.github/workflows/ci.yml` | **완료** |
-| - | Criterion ID 대소문자 정규화 | `eval_dispatch.py:_merge_criteria_results()` `.upper()` | **완료** |
-| - | Non-string verdict 방어 | `eval_dispatch.py` `str()` + fallback | **완료** |
-| - | Round 2 budget gate | `eval_dispatch.py` Round 2 전 `check_cost_limit()` | **완료** |
-| - | Plugin-root 상대경로 변환 | `validate_harness.py:audit_final_scope()` `relative_to()` | **완료** |
-
----
-
-## AHOY 가치 충돌 — 채택하지 않는 제안
+## 가치 충돌 — 채택하지 않는 제안
 
 ### "any fail → final fail" 원칙 위반
 
@@ -285,7 +143,7 @@ pytest 기반 단위/E2E 통합 테스트. eval_dispatch → issues.json → val
 
 ---
 
-## 보류 — 현재 단계에서 비용 대비 효용 낮음
+## 보류 — 비용 대비 효용 낮음
 
 | 제안 | 보류 사유 |
 |------|-----------|
@@ -298,23 +156,15 @@ pytest 기반 단위/E2E 통합 테스트. eval_dispatch → issues.json → val
 
 ---
 
-## 우선순위 Top 10 (v0.2.0 이후 구현 순서)
-
-### Phase 1: 즉시 (프롬프트/Hook 수준)
+## 우선순위 Top 10
 
 1. **T1-1 Anti-Rationalization Gate** — Generator 자기합리화 방어
 2. **T1-2 Stale-Read 감지** — 파일 해시 비교
 3. **T1-3 평가 관점 다차원화** — 모델별 관점 할당
 4. **T1-4 이슈 우선순위 P0-P3** — rework 효율화
-
-### Phase 2: 안전장치
-
 5. **T2-1 공허 합의 감지** — rolling pass rate + 근거 유사도
 6. **T1-5 Rework 전략 다양화** — 이전과 다른 접근법 강제
 7. **T2-2 민감 데이터 마스킹** — credential 자동 치환
-
-### Phase 3: 워크플로우 + 인프라
-
 8. **T3-1 Delta Contract** — rework 토큰 절감
 9. **T3-2 설계 리뷰 게이트** — planned→contracted 품질 검증
 10. **T4-1 Agent Trace** — 상태전이/Hook/평가 JSONL 캡처
