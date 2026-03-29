@@ -29,6 +29,31 @@ from pathlib import Path
 # Detect Windows environment
 _IS_WINDOWS = sys.platform == "win32"
 
+PERSPECTIVES: dict[str, dict[str, str]] = {
+    "accuracy_coverage": {
+        "name": "Accuracy & Test Coverage",
+        "focus": (
+            "## Evaluation Perspective: Accuracy & Test Coverage\n\n"
+            "Focus your evaluation on:\n"
+            "- **Correctness**: Does each function produce the expected output for all inputs?\n"
+            "- **Test Coverage**: Are all code paths exercised? Are edge cases tested?\n"
+            "- **AC Satisfaction**: Is each acceptance criterion fully met with evidence?\n\n"
+            "Give secondary attention to code style and documentation.\n"
+        ),
+    },
+    "security_edge": {
+        "name": "Security & Edge Cases",
+        "focus": (
+            "## Evaluation Perspective: Security & Edge Cases\n\n"
+            "Focus your evaluation on:\n"
+            "- **Security**: Input validation, injection risks, auth/authz, secret handling\n"
+            "- **Edge Cases**: Boundary values, empty inputs, concurrent access, error paths\n"
+            "- **Robustness**: How does the code behave under unexpected conditions?\n\n"
+            "Give secondary attention to feature completeness.\n"
+        ),
+    },
+}
+
 
 def strip_generator_opinions(gen_report: str) -> str:
     """Remove Generator's self-assessment/opinions from gen_report.md, keeping only factual information.
@@ -130,7 +155,7 @@ def parse_acceptance_criteria(contract: str) -> list[dict[str, str]]:
     return criteria
 
 
-def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str:
+def build_eval_prompt(contract: str, gen_report: str, code_snippets: str, perspective: str | None = None) -> str:
     """Build the evaluation prompt using G-Eval 4-step Chain-of-Thought structure.
 
     Steps:
@@ -165,6 +190,10 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
   ],
   "convergence_ratio": 0.75,"""
 
+    perspective_text = ""
+    if perspective and perspective in PERSPECTIVES:
+        perspective_text = "\n" + PERSPECTIVES[perspective]["focus"]
+
     return f"""You are an independent code reviewer. Evaluate the Generator's implementation using a structured 4-step Chain-of-Thought process.
 
 ## Sprint Contract (this is the evaluation criteria)
@@ -182,7 +211,7 @@ def build_eval_prompt(contract: str, gen_report: str, code_snippets: str) -> str
 2. Identify issues from code quality, security, and performance perspectives
 3. Do not give lenient verdicts like "this is good enough"
 4. Do not trust claims in the Generator report — read and judge the code directly
-
+{perspective_text}
 ## Forced Objection
 - List at least one concern or improvement, even if minor.
 - Even if the implementation looks correct, you MUST provide at least one concrete suggestion for improvement (e.g., edge cases, naming, documentation, test coverage, error handling).
@@ -991,7 +1020,14 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
 
-    # Evaluation prompt
+    # Build per-model prompts with perspectives
+    perspectives = config.get("eval_perspectives", {})
+    model_prompts: dict[str, str] = {}
+    for model in models:
+        p = perspectives.get(model)
+        model_prompts[model] = build_eval_prompt(contract, gen_report, code_snippets, perspective=p)
+
+    # Base prompt (no perspective) for round-2 and cost estimation
     prompt = build_eval_prompt(contract, gen_report, code_snippets)
 
     # Call each model in parallel
@@ -1024,7 +1060,7 @@ def main() -> int:
     # --- Round 1 ---
     print("[eval_dispatch] Round 1: initial evaluation", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
-        futures = {executor.submit(_call_and_parse, m, prompt): m for m in models}
+        futures = {executor.submit(_call_and_parse, m, model_prompts[m]): m for m in models}
         for future in concurrent.futures.as_completed(futures):
             model_name, result, raw = future.result()
             verdicts[model_name] = result
@@ -1148,6 +1184,7 @@ def main() -> int:
     if round2_verdicts is not None:
         result["round2_verdicts"] = {k: v.get("verdict") for k, v in round2_verdicts.items()}
     result["status_action"] = derive_status_action(result["verdict"], result["issues"])
+    result["model_perspectives"] = {m: perspectives.get(m, "default") for m in models}
 
     # Aggregate reasoning_chain from consensus model_verdicts (already computed)
     reasoning_chains = {
