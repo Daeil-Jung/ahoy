@@ -75,6 +75,106 @@ def normalize_issue_priority(issue: dict) -> dict:
         issue["severity"] = "major"
     return issue
 
+_SENSITIVE_PATTERNS: list[tuple[str, str, re.Pattern]] = [
+    ("API_KEY", "MASKED_API_KEY", re.compile(
+        r"""(?:api[_-]?key|apikey|api[_-]?token|access[_-]?token|auth[_-]?token)"""
+        r"""[\s]*[=:]\s*["']([A-Za-z0-9\-_\.]{20,})["']""",
+        re.IGNORECASE,
+    )),
+    ("PASSWORD", "MASKED_PASSWORD", re.compile(
+        r"""(?:password|passwd|pwd|secret)[\s]*[=:]\s*["']([^"'\s]{4,})["']""",
+        re.IGNORECASE,
+    )),
+    ("CONNECTION_STRING", "MASKED_CONN_STRING", re.compile(
+        r"""(?:mongodb|postgres|mysql|redis|amqp|sqlite):\/\/[^\s"']+""",
+        re.IGNORECASE,
+    )),
+    ("BEARER_TOKEN", "MASKED_BEARER", re.compile(
+        r"""Bearer\s+[A-Za-z0-9\-_\.]{20,}""",
+        re.IGNORECASE,
+    )),
+    ("AWS_KEY", "MASKED_AWS_KEY", re.compile(
+        r"""(?:AKIA|ASIA)[A-Z0-9]{16}""",
+    )),
+    ("PRIVATE_KEY", "MASKED_PRIVATE_KEY", re.compile(
+        r"""-----BEGIN[A-Z\s]*PRIVATE\s+KEY-----[\s\S]*?-----END[A-Z\s]*PRIVATE\s+KEY-----""",
+    )),
+    ("GENERIC_SECRET", "MASKED_SECRET", re.compile(
+        r"""(?:secret|credential|token)[\s]*[=:]\s*["']([A-Za-z0-9\-_\.]{16,})["']""",
+        re.IGNORECASE,
+    )),
+]
+
+
+class SensitiveDataMasker:
+    """Detects and masks sensitive data in code strings."""
+
+    def __init__(self, extra_patterns: list[dict] | None = None):
+        self._counter: dict[str, int] = {}
+        self._mask_map: dict[str, str] = {}
+        self._patterns = list(_SENSITIVE_PATTERNS)
+        if extra_patterns:
+            for ep in extra_patterns:
+                try:
+                    if not isinstance(ep, dict):
+                        print(f"[eval_dispatch] WARNING: Skipping non-dict masking pattern: {type(ep)}", file=sys.stderr)
+                        continue
+                    category = ep["category"]
+                    prefix = ep["mask_prefix"]
+                    compiled = re.compile(ep["regex"], re.IGNORECASE)
+                    self._patterns.append((category, prefix, compiled))
+                except (KeyError, re.error, TypeError) as exc:
+                    print(f"[eval_dispatch] WARNING: Skipping invalid masking pattern: {exc}", file=sys.stderr)
+
+    def mask(self, text: str) -> str:
+        """Replace sensitive data with [MASKED_*] tokens. Preserves line count."""
+        # Collect all matches with their positions
+        replacements: list[tuple[int, int, str]] = []  # (start, end, token)
+
+        for _category, prefix, pattern in self._patterns:
+            for match in pattern.finditer(text):
+                # Prefer capture group (just the secret) over full match
+                if match.lastindex and match.lastindex >= 1:
+                    original = match.group(1)
+                    start, end = match.start(1), match.end(1)
+                else:
+                    original = match.group(0)
+                    start, end = match.start(0), match.end(0)
+
+                # Reuse existing token for same literal
+                existing = [k for k, v in self._mask_map.items() if v == original]
+                if existing:
+                    token = existing[0]
+                else:
+                    idx = self._counter.get(prefix, 1)
+                    self._counter[prefix] = idx + 1
+                    token = f"[{prefix}_{idx}]"
+                    self._mask_map[token] = original
+
+                replacements.append((start, end, token))
+
+        # Sort by position descending so replacements don't shift earlier offsets
+        replacements.sort(key=lambda r: r[0], reverse=True)
+
+        # Apply replacements
+        result = text
+        for start, end, token in replacements:
+            result = result[:start] + token + result[end:]
+
+        return result
+
+    def get_mask_report(self) -> list[dict]:
+        """Return masking summary (without revealing values)."""
+        return [
+            {"token": token, "category": token.rsplit("_", 1)[0].strip("[]")}
+            for token in self._mask_map
+        ]
+
+    @property
+    def masked_count(self) -> int:
+        return len(self._mask_map)
+
+
 def strip_generator_opinions(gen_report: str) -> str:
     """Remove Generator's self-assessment/opinions from gen_report.md, keeping only factual information.
 
@@ -490,7 +590,7 @@ def resolve_reported_files(gen_report: str) -> list[str]:
     return list(dict.fromkeys(fallback_pattern.findall(gen_report)))
 
 
-def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
+def collect_code_snippets(sprint_dir: Path, project_root: Path, masker: SensitiveDataMasker | None = None) -> str:
     """Read file list from gen_report.md and collect code snippets."""
     gen_report_path = sprint_dir / "gen_report.md"
     if not gen_report_path.exists():
@@ -511,6 +611,8 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
         if file_path.exists() and file_path.stat().st_size < 50_000:
             try:
                 code = file_path.read_text(encoding="utf-8")
+                if masker:
+                    code = masker.mask(code)
                 snippets.append(f"### {file_rel}\n```\n{code}\n```")
             except (UnicodeDecodeError, OSError):
                 pass
@@ -1117,13 +1219,22 @@ def main() -> int:
     if gen_report_path.exists():
         gen_report = gen_report_path.read_text(encoding="utf-8")
 
+    masking_config = config.get("sensitive_data_masking", {})
+    masker = None
+    if masking_config.get("enabled", True):
+        extra = masking_config.get("extra_patterns", [])
+        masker = SensitiveDataMasker(extra_patterns=extra if extra else None)
+
     try:
-        code_snippets = collect_code_snippets(sprint_dir, project_root)
+        code_snippets = collect_code_snippets(sprint_dir, project_root, masker=masker)
     except ValueError as exc:
         result = _error_result(sprint_dir, models, str(exc))
         write_result(sprint_dir, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
+
+    if masker and masker.masked_count > 0:
+        print(f"[eval_dispatch] Sensitive data masking: {masker.masked_count} items masked", file=sys.stderr)
 
     # Build per-model prompts with perspectives
     perspectives = config.get("eval_perspectives", {})
@@ -1304,6 +1415,9 @@ def main() -> int:
     # Include reason if error
     if consensus.get("reason"):
         result["error_reason"] = consensus["reason"]
+
+    if masker and masker.masked_count > 0:
+        result["masking_report"] = masker.get_mask_report()
 
     # Save issues.json
     write_result(sprint_dir, result)
