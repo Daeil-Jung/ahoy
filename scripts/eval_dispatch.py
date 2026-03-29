@@ -1091,7 +1091,8 @@ def main() -> int:
                 tokens += estimate
         return tokens
 
-    round1_tokens = _calc_round_tokens(raw_responses, verdicts, len(prompt))
+    max_prompt_len = max(len(p) for p in model_prompts.values()) if model_prompts else len(prompt)
+    round1_tokens = _calc_round_tokens(raw_responses, verdicts, max_prompt_len)
 
     # Read the current sprint's attempt number from harness_state.json
     current_attempt = 0
