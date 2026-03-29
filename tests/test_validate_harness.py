@@ -852,6 +852,151 @@ def test_circuit_breaker_archives_gen_report(monkeypatch: pytest.MonkeyPatch, tm
     assert archived.read_text(encoding="utf-8") == gen_content
 
 
+# ── Anti-rationalization gate tests ──────────────────────────────
+
+
+def _setup_anti_rationalization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contract_acs: list[str],
+    gen_report_content: str = "",
+    *,
+    tool_input: dict | None = None,
+    gen_report_on_disk: str | None = None,
+) -> None:
+    """Helper to set up harness state, contract, and CLAUDE_TOOL_INPUT for anti-rationalization tests."""
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path)
+    ac_lines = "\n".join(f"- {ac}" for ac in contract_acs)
+    write_contract(
+        tmp_path,
+        f"## Implementation Scope\n### Files to Modify\n- `src/app.py`\n\n## Acceptance Criteria\n{ac_lines}",
+    )
+    if tool_input is None:
+        tool_input = {"file_path": "gen_report.md", "content": gen_report_content}
+    monkeypatch.setenv("CLAUDE_TOOL_INPUT", json.dumps(tool_input))
+    if gen_report_on_disk is not None:
+        report_path = tmp_path / ".claude" / "harness" / "sprints" / "sprint-001" / "gen_report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(gen_report_on_disk, encoding="utf-8")
+
+
+def test_anti_rationalization_passes_all_acs_covered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC | Status |\n| AC-001 | pass |\n| AC-002 | pass |\n",
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_blocks_rationalized_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | pass |\n\n## Unresolved Issues\n- AC-001: not needed for current implementation\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_blocks_missing_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_allows_honest_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | fail |\n\n## Unresolved Issues\n- AC-002: test suite fails due to timeout in CI\n",
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_detects_korean_patterns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works"],
+        "## AC Coverage\n| AC-001 | pass |\n\n## Unresolved Issues\n- AC-001: 현재 구조상 불필요\n",
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_skips_non_harness_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    # No harness state set up — should pass silently
+    monkeypatch.setenv(
+        "CLAUDE_TOOL_INPUT",
+        json.dumps({"file_path": "gen_report.md", "content": "## Unresolved Issues\n- AC-001: not needed\n"}),
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_edit_tool_reconstructs_post_edit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Edit tool: old_string->new_string replacement on disk content reconstructs full post-edit state."""
+    disk_content = "## AC Coverage\n| AC-001 | pass |\n| AC-002 | TODO |\n"
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        tool_input={"file_path": "gen_report.md", "old_string": "| AC-002 | TODO |", "new_string": "| AC-002 | pass |"},
+        gen_report_on_disk=disk_content,
+    )
+    validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_edit_tool_detects_rationalization(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Edit tool: rationalization pattern added via edit is caught in reconstructed post-edit state."""
+    disk_content = "## AC Coverage\n| AC-001 | pass |\n\n## Unresolved Issues\n- AC-001: placeholder\n"
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works"],
+        tool_input={"file_path": "gen_report.md", "old_string": "- AC-001: placeholder", "new_string": "- AC-001: not needed for current implementation"},
+        gen_report_on_disk=disk_content,
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_edit_tool_missing_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Edit tool: AC missing from reconstructed post-edit state is caught."""
+    disk_content = "## AC Coverage\n| AC-001 | pass |\n| AC-002 | pass |\n"
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        tool_input={"file_path": "gen_report.md", "old_string": "| AC-002 | pass |", "new_string": "| removed |"},
+        gen_report_on_disk=disk_content,
+    )
+    with pytest.raises(SystemExit):
+        validate_harness.check_anti_rationalization()
+
+
+def test_anti_rationalization_write_tool_ignores_disk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Write tool: content field is the full file, disk content is irrelevant."""
+    _setup_anti_rationalization(
+        monkeypatch,
+        tmp_path,
+        ["AC-001 Feature X works", "AC-002 Tests pass"],
+        gen_report_content="## AC Coverage\n| AC-001 | pass |\n| AC-002 | pass |\n",
+        gen_report_on_disk="## Old content with no AC references\n",
+    )
+    validate_harness.check_anti_rationalization()
+
+
 # ── Stale-read detection tests ────────────────────────────────
 
 
@@ -941,91 +1086,6 @@ def test_stale_read_multiple_reads_uses_latest(monkeypatch: pytest.MonkeyPatch, 
     validate_harness.record_read_hash()
 
     validate_harness.check_stale_read()
-
-
-# ── Anti-rationalization gate tests ──────────────────────────────
-
-
-def _setup_anti_rationalization(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    contract_acs: list[str],
-    gen_report_content: str,
-) -> None:
-    """Helper to set up harness state, contract, and CLAUDE_TOOL_INPUT for anti-rationalization tests."""
-    monkeypatch.chdir(tmp_path)
-    write_harness_state(tmp_path)
-    ac_lines = "\n".join(f"- {ac}" for ac in contract_acs)
-    write_contract(
-        tmp_path,
-        f"## Implementation Scope\n### Files to Modify\n- `src/app.py`\n\n## Acceptance Criteria\n{ac_lines}",
-    )
-    monkeypatch.setenv(
-        "CLAUDE_TOOL_INPUT",
-        json.dumps({"file_path": "gen_report.md", "content": gen_report_content}),
-    )
-
-
-def test_anti_rationalization_passes_all_acs_covered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    _setup_anti_rationalization(
-        monkeypatch,
-        tmp_path,
-        ["AC-001 Feature X works", "AC-002 Tests pass"],
-        "## AC Coverage\n| AC | Status |\n| AC-001 | pass |\n| AC-002 | pass |\n",
-    )
-    validate_harness.check_anti_rationalization()
-
-
-def test_anti_rationalization_blocks_rationalized_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    _setup_anti_rationalization(
-        monkeypatch,
-        tmp_path,
-        ["AC-001 Feature X works", "AC-002 Tests pass"],
-        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | pass |\n\n## Unresolved Issues\n- AC-001: not needed for current implementation\n",
-    )
-    with pytest.raises(SystemExit):
-        validate_harness.check_anti_rationalization()
-
-
-def test_anti_rationalization_blocks_missing_ac(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    _setup_anti_rationalization(
-        monkeypatch,
-        tmp_path,
-        ["AC-001 Feature X works", "AC-002 Tests pass"],
-        "## AC Coverage\n| AC-001 | pass |\n",
-    )
-    with pytest.raises(SystemExit):
-        validate_harness.check_anti_rationalization()
-
-
-def test_anti_rationalization_allows_honest_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    _setup_anti_rationalization(
-        monkeypatch,
-        tmp_path,
-        ["AC-001 Feature X works", "AC-002 Tests pass"],
-        "## AC Coverage\n| AC-001 | pass |\n| AC-002 | fail |\n\n## Unresolved Issues\n- AC-002: test suite fails due to timeout in CI\n",
-    )
-    validate_harness.check_anti_rationalization()
-
-
-def test_anti_rationalization_detects_korean_patterns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    _setup_anti_rationalization(
-        monkeypatch,
-        tmp_path,
-        ["AC-001 Feature X works"],
-        "## AC Coverage\n| AC-001 | pass |\n\n## Unresolved Issues\n- AC-001: 현재 구조상 불필요\n",
-    )
-    with pytest.raises(SystemExit):
-        validate_harness.check_anti_rationalization()
-
-
-def test_anti_rationalization_skips_non_harness_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(
-        "CLAUDE_TOOL_INPUT",
-        json.dumps({"file_path": "gen_report.md", "content": "## Unresolved Issues\n- AC-001: not needed\n"}),
-    )
-    validate_harness.check_anti_rationalization()
 
 
 def test_anti_rationalization_ac_parser_checklist_format(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

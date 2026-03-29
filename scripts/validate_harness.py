@@ -1082,7 +1082,12 @@ def check_anti_rationalization() -> None:
 
     # Parse acceptance criteria from contract.md
     contract_text = contract_path.read_text(encoding="utf-8")
-    ac_ids: list[str] = re.findall(r"\bAC-\d+\b", contract_text)
+    ac_ids: list[str] = []
+    for line in contract_text.splitlines():
+        stripped = line.strip()
+        match = re.match(r"^[-*]\s+(?:\[.?\]\s*)?(?:\*\*\s*)?(AC-\d+)", stripped)
+        if match:
+            ac_ids.append(match.group(1))
 
     if not ac_ids:
         return  # No ACs defined
@@ -1106,7 +1111,7 @@ def check_anti_rationalization() -> None:
 
     # Reconstruct post-edit file state:
     # - Write tool: content IS the full file
-    # - Edit tool: apply old_string→new_string on disk content
+    # - Edit tool: apply old_string->new_string on disk content
     gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
 
     if write_content:
@@ -1122,6 +1127,9 @@ def check_anti_rationalization() -> None:
             post_edit_content = new_string
     else:
         post_edit_content = new_string or write_content
+
+    if not post_edit_content:
+        return
 
     # Find "Unresolved Issues" section and check for rationalized ACs
     rationalized: list[str] = []
