@@ -1169,6 +1169,158 @@ def _record_convergence(
         print(f"[eval_dispatch] Failed to update harness_state.json: {exc}", file=sys.stderr)
 
 
+
+
+def _tokenize(text: str) -> set[str]:
+    """Simple word tokenization for Jaccard similarity."""
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def compute_rationale_similarity(verdicts: dict[str, dict]) -> float:
+    """Compute max pairwise Jaccard similarity of reasoning_chain.final_reasoning.
+
+    Returns 0.0-1.0. Returns 0.0 if fewer than 2 valid rationales.
+    """
+    rationales = []
+    for v in verdicts.values():
+        chain = v.get("reasoning_chain")
+        if isinstance(chain, dict):
+            text = chain.get("final_reasoning", "")
+            if text:
+                rationales.append(_tokenize(text))
+    if len(rationales) < 2:
+        return 0.0
+    max_sim = 0.0
+    for i in range(len(rationales)):
+        for j in range(i + 1, len(rationales)):
+            intersection = rationales[i] & rationales[j]
+            union = rationales[i] | rationales[j]
+            if union:
+                sim = len(intersection) / len(union)
+                max_sim = max(max_sim, sim)
+    return max_sim
+
+
+def get_rolling_pass_rate(harness_state_path: Path, window: int = 10) -> float:
+    """Compute pass rate over the last ``window`` completed sprint evaluations."""
+    try:
+        state = json.loads(harness_state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return 0.0
+    completed = [s for s in state.get("sprints", []) if s.get("status") in ("passed", "failed")]
+    recent = completed[-window:]
+    if not recent:
+        return 0.0
+    passed = sum(1 for s in recent if s["status"] == "passed")
+    return passed / len(recent)
+
+
+def detect_hollow_consensus(
+    consensus: dict,
+    verdicts: dict[str, dict],
+    harness_state_path: Path,
+) -> dict:
+    """Detect suspicious unanimous pass with no issues and similar rationales.
+
+    Requires BOTH high rationale similarity AND high rolling pass rate to flag.
+    """
+    result = {"detected": False, "reasons": [], "rolling_pass_rate": 0.0}
+
+    if consensus.get("consensus_verdict") != "pass":
+        return result
+    if len(consensus.get("issues", [])) > 0:
+        return result
+
+    similarity = compute_rationale_similarity(verdicts)
+    has_high_similarity = similarity >= 0.85
+    if has_high_similarity:
+        result["reasons"].append(f"high_rationale_similarity_{similarity:.2f}")
+
+    rate = get_rolling_pass_rate(harness_state_path)
+    result["rolling_pass_rate"] = rate
+    has_high_pass_rate = rate > 0.9
+    if has_high_pass_rate:
+        result["reasons"].append(f"rolling_pass_rate_{rate:.2f}")
+
+    result["detected"] = has_high_similarity and has_high_pass_rate
+
+    return result
+
+
+def build_avoidance_summary(sprint_dir: Path, current_attempt: int) -> str:
+    """Build a structured avoidance pattern summary from previous attempts.
+
+    Reads per-attempt gen_report archives (gen_report.md.attempt-{N}) and
+    issues.json.attempt-N files to extract what was tried and why it failed.
+    Returns markdown string for injection into Generator prompt.
+
+    Returns empty string if current_attempt < 2.
+    """
+    if current_attempt < 2:
+        return ""
+
+    sections = []
+    for prev_attempt in range(1, current_attempt):
+        attempt_section = f"### Attempt {prev_attempt}\n"
+
+        # Read per-attempt gen_report archive instead of current gen_report.md
+        approach_summary = ""
+        gen_report_path = sprint_dir / f"gen_report.md.attempt-{prev_attempt}"
+        if not gen_report_path.exists():
+            # Fallback to current gen_report.md for backward compat
+            gen_report_path = sprint_dir / "gen_report.md"
+        if gen_report_path.exists():
+            try:
+                report_text = gen_report_path.read_text(encoding="utf-8")
+                summary_match = re.search(
+                    r"## Implementation Summary\s*\n([\s\S]*?)(?=\n## |\Z)",
+                    report_text,
+                )
+                if summary_match:
+                    approach_summary = summary_match.group(1).strip()[:500]
+            except OSError:
+                pass
+
+        issues_file = sprint_dir / f"issues.json.attempt-{prev_attempt}"
+        failure_reasons: list[str] = []
+        if issues_file.exists():
+            try:
+                data = json.loads(issues_file.read_text(encoding="utf-8"))
+                for issue in data.get("issues", [])[:5]:
+                    desc = issue.get("description", "")
+                    severity = issue.get("severity", "")
+                    failure_reasons.append(f"- [{severity}] {desc}")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if approach_summary:
+            attempt_section += f"**Approach taken**: {approach_summary}\n\n"
+        if failure_reasons:
+            attempt_section += "**Failed because**:\n" + "\n".join(failure_reasons) + "\n\n"
+
+        if approach_summary or failure_reasons:
+            sections.append(attempt_section)
+
+    if not sections:
+        return ""
+
+    header = (
+        "## Avoidance Patterns (DO NOT repeat these approaches)\n\n"
+        "The following approaches have been tried and failed. "
+        "You MUST use a fundamentally different implementation strategy.\n\n"
+    )
+
+    footer = (
+        "\n## Diversification Instructions\n"
+        "- Use a different algorithm, data structure, or architectural approach from above.\n"
+        "- Explicitly state how your new approach differs from the failed attempts.\n"
+        "- If the previous attempt used approach X, choose an alternative.\n"
+    )
+
+    return header + "\n".join(sections) + footer
+
+
+
 def main() -> int:
     config = load_config()
     default_models = ",".join(config.get("eval_models", ["codex", "claude"]))
@@ -1415,6 +1567,12 @@ def main() -> int:
     # Include reason if error
     if consensus.get("reason"):
         result["error_reason"] = consensus["reason"]
+
+    # Hollow consensus detection
+    hollow = detect_hollow_consensus(consensus, verdicts, harness_state_path)
+    if hollow["detected"]:
+        print(f"[eval_dispatch] WARNING: Hollow consensus detected \u2014 {hollow['reasons']}", file=sys.stderr)
+        result["hollow_consensus"] = hollow
 
     if masker and masker.masked_count > 0:
         result["masking_report"] = masker.get_mask_report()
