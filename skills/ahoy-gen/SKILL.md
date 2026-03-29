@@ -123,6 +123,19 @@ If `issues.json` exists:
 4. Check the `found_by` field to identify which external model found the issue
 5. If an issue cannot be fixed, record the reason in gen_report.md
 
+### Rework Strategy Diversification (attempt >= 2)
+
+When the current attempt is 2 or higher, an **Avoidance Patterns** section will be prepended to this prompt by the orchestrator. This section contains:
+- Previous implementation approaches that were tried
+- The specific issues that caused each approach to fail
+- A directive to use a fundamentally different strategy
+
+**You MUST**:
+1. Read the Avoidance Patterns section carefully
+2. Choose an implementation strategy that differs from all listed failed approaches
+3. In your gen_report.md, explicitly state how your approach differs
+4. Do NOT repeat the same algorithm, data structure, or pattern that previously failed
+
 ## Test Execution
 
 After implementation, run the `eval_strategy.test_command` from spec.md.

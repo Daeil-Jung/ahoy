@@ -896,3 +896,30 @@ def test_build_avoidance_summary_returns_empty_for_first_attempt(tmp_path: Path)
 
     summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=0)
     assert summary == ""
+
+
+def test_build_avoidance_summary_attempt_1_returns_empty(tmp_path: Path):
+    assert eval_dispatch.build_avoidance_summary(tmp_path, 1) == ""
+
+
+def test_build_avoidance_summary_missing_issues_file(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "## Implementation Summary\nUsed hash map\n## End\n",
+        encoding="utf-8",
+    )
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 2)
+
+    assert "Attempt 1" in result
+    assert "hash map" in result
+
+
+def test_build_avoidance_summary_both_missing(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    result = eval_dispatch.build_avoidance_summary(sprint_dir, 2)
+
+    assert result == ""
