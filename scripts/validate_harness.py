@@ -1123,9 +1123,20 @@ def check_anti_rationalization() -> None:
                 if ac_id in stripped and _RATIONALIZATION_PATTERNS.search(stripped):
                     rationalized.append(ac_id)
 
+    # For AC coverage check, use full file from disk if available
+    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
+    full_content = content  # fallback to tool input
+    if gen_report_path.exists():
+        try:
+            full_content = gen_report_path.read_text(encoding="utf-8")
+            # Hook runs pre-tool, so merge existing file + new content
+            full_content = full_content + "\n" + content
+        except OSError:
+            pass
+
     # Check for ACs completely missing from the report
     for ac_id in ac_ids:
-        if ac_id not in content:
+        if ac_id not in full_content:
             missing.append(ac_id)
 
     blocked: list[str] = []
