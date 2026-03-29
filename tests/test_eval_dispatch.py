@@ -946,3 +946,216 @@ def test_detect_hollow_consensus_with_issues(tmp_path: Path):
     }
     result = eval_dispatch.detect_hollow_consensus(consensus, verdicts, state_file)
     assert result["detected"] is False
+
+
+# ── v0.2.1 gen_report archiving / avoidance summary tests ────────
+
+
+def test_build_avoidance_summary_reads_per_attempt_archives(tmp_path: Path):
+    """build_avoidance_summary should read gen_report.md.attempt-N files."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    (sprint_dir / "gen_report.md.attempt-1").write_text(
+        "# Report\nApproach: used retry logic\nFiles modified: a.py",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md.attempt-2").write_text(
+        "# Report\nApproach: used caching\nFiles modified: b.py",
+        encoding="utf-8",
+    )
+    (sprint_dir / "gen_report.md").write_text(
+        "# Report\nApproach: complete rewrite\nFiles modified: c.py",
+        encoding="utf-8",
+    )
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=2)
+
+    assert "Attempt 1" in summary
+    assert "retry logic" in summary
+    assert "Attempt 2" in summary
+    assert "caching" in summary
+    assert "Previous Attempt Approaches" in summary
+
+
+def test_build_avoidance_summary_falls_back_to_current_gen_report(tmp_path: Path):
+    """When no per-attempt archive exists, fall back to current gen_report.md."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    (sprint_dir / "gen_report.md").write_text(
+        "# Report\nApproach: initial attempt",
+        encoding="utf-8",
+    )
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=1)
+
+    assert "Attempt 1" in summary
+    assert "initial attempt" in summary
+
+
+def test_build_avoidance_summary_returns_empty_for_first_attempt(tmp_path: Path):
+    """No avoidance summary needed on the first attempt (attempt=0)."""
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+
+    summary = eval_dispatch.build_avoidance_summary(sprint_dir, current_attempt=0)
+    assert summary == ""
+
+
+# ── v0.3.0 multi-dimensional evaluation perspectives tests ──────
+
+
+def test_build_eval_prompt_no_perspective():
+    prompt_default = eval_dispatch.build_eval_prompt("AC-001", "report", "code")
+    prompt_none = eval_dispatch.build_eval_prompt("AC-001", "report", "code", perspective=None)
+    assert prompt_default == prompt_none
+    assert "Evaluation Perspective" not in prompt_default
+
+
+def test_build_eval_prompt_with_accuracy_perspective():
+    prompt = eval_dispatch.build_eval_prompt(
+        "AC-001", "report", "code", perspective="accuracy_coverage"
+    )
+    assert "Accuracy & Test Coverage" in prompt
+    assert "Test Coverage" in prompt
+    assert "AC Satisfaction" in prompt
+
+
+def test_build_eval_prompt_with_security_perspective():
+    prompt = eval_dispatch.build_eval_prompt(
+        "AC-001", "report", "code", perspective="security_edge"
+    )
+    assert "Security & Edge Cases" in prompt
+    assert "Input validation" in prompt
+    assert "Robustness" in prompt
+
+
+def test_build_eval_prompt_unknown_perspective_ignored():
+    prompt = eval_dispatch.build_eval_prompt(
+        "AC-001", "report", "code", perspective="nonexistent_perspective"
+    )
+    assert "Evaluation Perspective" not in prompt
+
+
+def test_main_uses_per_model_prompts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("AC-001", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text(
+        "### Files Modified\n- `scripts/example.py`\n",
+        encoding="utf-8",
+    )
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+
+    captured_prompts: dict[str, str] = {}
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        captured_prompts[model] = prompt
+        return json.dumps(
+            {
+                "verdict": "pass",
+                "issues": [],
+                "passed_criteria": ["AC-001"],
+                "failed_criteria": [],
+                "summary": f"{model} pass",
+            }
+        )
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch,
+        "load_config",
+        lambda: {
+            "eval_models": ["codex", "gemini"],
+            "min_models": 2,
+            "cost_limit": None,
+            "eval_perspectives": {
+                "codex": "accuracy_coverage",
+                "gemini": "security_edge",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        [
+            "eval_dispatch.py",
+            str(sprint_dir),
+            "--models",
+            "codex,gemini",
+            "--project-root",
+            str(project_root),
+        ],
+    )
+
+    assert eval_dispatch.main() == 0
+
+    # Verify each model received a different perspective-focused prompt
+    assert "Accuracy & Test Coverage" in captured_prompts["codex"]
+    assert "Security & Edge Cases" not in captured_prompts["codex"]
+    assert "Security & Edge Cases" in captured_prompts["gemini"]
+    assert "Accuracy & Test Coverage" not in captured_prompts["gemini"]
+
+
+def test_result_includes_model_perspectives(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("AC-001", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text(
+        "### Files Modified\n- `scripts/example.py`\n",
+        encoding="utf-8",
+    )
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        return json.dumps(
+            {
+                "verdict": "pass",
+                "issues": [],
+                "passed_criteria": ["AC-001"],
+                "failed_criteria": [],
+                "summary": f"{model} pass",
+            }
+        )
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch,
+        "load_config",
+        lambda: {
+            "eval_models": ["codex", "gemini"],
+            "min_models": 2,
+            "cost_limit": None,
+            "eval_perspectives": {
+                "codex": "accuracy_coverage",
+                "gemini": "security_edge",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        [
+            "eval_dispatch.py",
+            str(sprint_dir),
+            "--models",
+            "codex,gemini",
+            "--project-root",
+            str(project_root),
+        ],
+    )
+
+    eval_dispatch.main()
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+
+    assert payload["model_perspectives"] == {
+        "codex": "accuracy_coverage",
+        "gemini": "security_edge",
+    }

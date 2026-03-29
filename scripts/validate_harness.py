@@ -17,9 +17,12 @@ Usage: validate_harness.py <check_type>
     pre-push             — Run tests, lint, type check + verify state consistency before push
     post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
     circuit-breaker      — Detect repeated failure patterns across rework attempts
+    record-read          — After Read: record file hash for stale-read detection
+    stale-read-check     — Before Edit/Write: verify file has not changed since last Read
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -221,6 +224,80 @@ def fail(msg: str) -> None:
 
 def info(msg: str) -> None:
     print(msg)
+
+
+# ── Stale-read detection ──────────────────────────────────────
+
+_READ_HASH_FILE = HARNESS_DIR / ".read_hashes.json"
+
+
+def _file_hash(path: Path) -> str:
+    """Compute SHA-256 of file contents."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_read_hashes() -> dict[str, str]:
+    """Load the read hash registry."""
+    if _READ_HASH_FILE.exists():
+        try:
+            return json.loads(_READ_HASH_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_read_hashes(hashes: dict[str, str]) -> None:
+    """Persist the read hash registry."""
+    _READ_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _READ_HASH_FILE.write_text(json.dumps(hashes, indent=2), encoding="utf-8")
+
+
+def record_read_hash() -> None:
+    """PostToolUse Read: record the hash of the file that was just read."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+    resolved = Path(file_path)
+    if not resolved.is_file():
+        return
+    hashes = _load_read_hashes()
+    hashes[str(resolved)] = _file_hash(resolved)
+    _save_read_hashes(hashes)
+
+
+def check_stale_read() -> None:
+    """PreToolUse Edit/Write: compare current file hash to last-read hash."""
+    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
+    if not tool_input_raw:
+        return
+    try:
+        tool_input = json.loads(tool_input_raw)
+    except json.JSONDecodeError:
+        return
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return
+    resolved = Path(file_path)
+    if not resolved.is_file():
+        return  # New file creation — no hash to compare
+    hashes = _load_read_hashes()
+    stored_hash = hashes.get(str(resolved))
+    if stored_hash is None:
+        print(f"[HARNESS-WARN] No Read recorded for {file_path} — proceeding without stale check", file=sys.stderr)
+        return
+    current_hash = _file_hash(resolved)
+    if current_hash != stored_hash:
+        fail(
+            f"[HARNESS-GUARD] Blocked: Stale read detected for {file_path}. "
+            "File has been modified since last Read. Re-read the file before editing."
+        )
 
 
 # ── Failure pattern detection (circuit breaker) ────────────────
@@ -1011,6 +1088,8 @@ CHECKS = {
     "post-edit-quality": check_post_edit_quality,
     "circuit-breaker": check_circuit_breaker,
     "hollow-consensus": check_hollow_consensus,
+    "record-read": record_read_hash,
+    "stale-read-check": check_stale_read,
 }
 
 
