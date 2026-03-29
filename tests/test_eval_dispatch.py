@@ -580,6 +580,49 @@ def test_validate_objections_skips_error_verdicts():
     assert validated == parsed
 
 
+def test_merge_criteria_results_normalizes_criterion_id_case():
+    merged, ratio = eval_dispatch._merge_criteria_results(
+        {
+            "codex": {
+                "criteria_results": [
+                    {"criterion_id": "ac-001", "description": "first", "verdict": "pass", "evidence": "ok"},
+                ]
+            },
+            "claude": {
+                "criteria_results": [
+                    {"criterion_id": "AC-001", "description": "first", "verdict": "pass", "evidence": "ok"},
+                ]
+            },
+        },
+        known_criteria=[{"id": "AC-001", "description": "first"}],
+    )
+
+    assert ratio == 1.0
+    assert len(merged) == 1
+    assert merged[0]["verdict"] == "pass"
+
+
+def test_merge_criteria_results_handles_non_string_verdict():
+    merged, ratio = eval_dispatch._merge_criteria_results(
+        {
+            "codex": {
+                "criteria_results": [
+                    {"criterion_id": "AC-001", "description": "first", "verdict": None, "evidence": "ok"},
+                ]
+            },
+            "claude": {
+                "criteria_results": [
+                    {"criterion_id": "AC-001", "description": "first", "verdict": "pass", "evidence": "ok"},
+                ]
+            },
+        },
+        known_criteria=[{"id": "AC-001", "description": "first"}],
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["verdict"] == "fail"
+
+
 def test_merge_criteria_results_full_pass_ratio():
     merged, ratio = eval_dispatch._merge_criteria_results(
         {
@@ -689,6 +732,62 @@ def test_warn_if_missing_reasoning_chain_logs_warnings(capsys: pytest.CaptureFix
         "codex", {"verdict": "pass", "reasoning_chain": {"code_understanding": "a"}}
     )
     assert "incomplete" in capsys.readouterr().err
+
+
+def test_main_round2_skipped_when_cost_limit_exceeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("## Acceptance Criteria\n- AC-1: works", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `scripts/example.py`\n", encoding="utf-8")
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+    harness_dir = project_root / ".claude" / "harness"
+    harness_dir.mkdir(parents=True)
+    # Set cost tracking so round-1 preflight passes but round-2 check triggers abort
+    # Preflight: 98 + 2 (pending) = 100, NOT > 100 → passes
+    # After round-1 tracking: 100 total. Round-2 check: 100 + 2 > 100 → abort
+    (harness_dir / "harness_state.json").write_text(
+        json.dumps({
+            "sprints": [{"sprint_id": "sprint-001", "attempt": 1}],
+            "cost_tracking": {"total_eval_calls": 98, "total_tokens": 0, "history": []},
+        }),
+        encoding="utf-8",
+    )
+
+    call_count = {"total": 0}
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        call_count["total"] += 1
+        # Round 1: conflict to trigger round 2 attempt
+        verdict = "fail" if model == "codex" else "pass"
+        return json.dumps({
+            "verdict": verdict,
+            "objections": ["nit"],
+            "criteria_results": [{"criterion_id": "AC-1", "description": "works", "verdict": "pass", "evidence": "ok"}],
+            "issues": [{"id": "ISS-1", "severity": "minor", "description": "nit"}] if verdict == "fail" else [],
+            "passed_criteria": ["AC-1"] if verdict == "pass" else [],
+            "failed_criteria": ["AC-1"] if verdict == "fail" else [],
+            "summary": f"{model} verdict",
+        })
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch, "load_config",
+        lambda: {"eval_models": ["codex", "claude"], "min_models": 2, "cost_limit": {"max_eval_calls": 100, "max_tokens": 500000}},
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    eval_dispatch.main()
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+
+    # Round 2 should be skipped due to cost limit — only round 1 calls made
+    assert call_count["total"] == 2  # Only round 1 (codex + claude)
+    assert payload["evaluation_rounds"] == 1
 
 
 def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

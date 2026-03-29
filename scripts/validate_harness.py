@@ -788,11 +788,17 @@ def audit_final_scope() -> None:
 
     # Filter out harness-internal files and plugin-root files — always allowed
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    plugin_root_normalized = plugin_root.replace("\\", "/") if plugin_root else ""
+    plugin_root_rel = ""
+    if plugin_root:
+        try:
+            plugin_root_rel = str(Path(plugin_root).resolve().relative_to(Path.cwd().resolve())).replace("\\", "/")
+        except ValueError:
+            # Plugin root is outside the repo — use absolute path normalized
+            plugin_root_rel = plugin_root.replace("\\", "/")
     user_changed = [
         f for f in sorted(changed_files)
         if not f.startswith(".claude/harness/")
-        and not (plugin_root_normalized and f.startswith(plugin_root_normalized))
+        and not (plugin_root_rel and (f.startswith(plugin_root_rel + "/") or f.startswith(plugin_root_rel)))
     ]
 
     # Check preserved files for unauthorized modifications

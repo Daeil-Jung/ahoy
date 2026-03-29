@@ -758,6 +758,30 @@ def test_check_pre_push_runs_all_and_checks_consistent_state(monkeypatch: pytest
     assert ("type check", "uv run mypy scripts") in called
 
 
+def test_audit_final_scope_filters_plugin_root_relative(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    write_contract(tmp_path, "## Implementation Scope\n### Files to Modify\n- `scripts/eval_dispatch.py`")
+    plugin_dir = tmp_path / "my-plugin"
+    plugin_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_dir))
+
+    class Result:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = iter([
+        Result(0, "ok"),                          # git rev-parse HEAD
+        Result(0, "my-plugin/scripts/hook.py\n"), # git diff HEAD (plugin-root file)
+        Result(0, ""),                            # git diff --cached
+    ])
+    monkeypatch.setattr(validate_harness.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    validate_harness.audit_final_scope()  # Should not raise — plugin-root files are allowed
+
+
 def test_hooks_json_covers_all_expected_check_types():
     hooks = json.loads(
         (Path(__file__).resolve().parents[1] / "hooks" / "hooks.json").read_text(encoding="utf-8")

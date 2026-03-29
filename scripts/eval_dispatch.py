@@ -545,7 +545,7 @@ def _merge_criteria_results(
 
     for model_name, cr_list in per_model.items():
         for cr in cr_list:
-            cid = cr.get("criterion_id", "")
+            cid = cr.get("criterion_id", "").upper()
             if not cid:
                 continue
             if cid not in all_criteria:
@@ -557,7 +557,8 @@ def _merge_criteria_results(
                     "evidence": [],
                 }
             # A criterion fails consensus if any model says fail
-            model_verdict = cr.get("verdict", "fail").lower()
+            raw_verdict = cr.get("verdict", "fail")
+            model_verdict = str(raw_verdict).lower() if raw_verdict is not None else "fail"
             all_criteria[cid]["model_verdicts"][model_name] = model_verdict
             if model_verdict != "pass":
                 all_criteria[cid]["verdict"] = "fail"
@@ -1067,47 +1068,57 @@ def main() -> int:
     except (json.JSONDecodeError, OSError, FileNotFoundError):
         pass
 
-    round1_verdicts = dict(verdicts)
-    evaluation_rounds = 1
-    round2_verdicts: dict[str, dict] | None = None
-    round2_tokens = 0
-
-    # --- Round 2 (only if verdicts conflict) ---
-    if check_verdict_conflict(verdicts):
-        evaluation_rounds = 2
-        print("[eval_dispatch] Round 1 verdicts conflict — starting Round 2 cross-verification", file=sys.stderr)
-        round2_prompt = build_round2_prompt(prompt, round1_verdicts)
-        round2_verdicts = {}
-        round2_raw: dict[str, str] = {}
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
-            futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
-            for future in concurrent.futures.as_completed(futures):
-                model_name, result, _raw = future.result()
-                round2_verdicts[model_name] = result
-                round2_raw[model_name] = _raw
-
-        round2_tokens = _calc_round_tokens(round2_raw, round2_verdicts, len(round2_prompt))
-
-        # Use round 2 verdicts only if quorum is maintained
-        round2_valid = {k: v for k, v in round2_verdicts.items() if v.get("verdict") != "error"}
-        if len(round2_valid) >= args.min_models:
-            verdicts = round2_verdicts
-        else:
-            print(f"[eval_dispatch] Round 2 quorum lost ({len(round2_valid)} valid < {args.min_models} required), using round 1 results", file=sys.stderr)
-    else:
-        print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
-
-    # Persist cost tracking for all rounds
-    total_eval_calls = len(models) * evaluation_rounds
-    total_tokens_this_run = round1_tokens + round2_tokens
+    # Persist round-1 cost tracking immediately so budget gate reads up-to-date totals
     update_cost_tracking(
         harness_state_path,
-        eval_calls=total_eval_calls,
-        tokens=total_tokens_this_run,
+        eval_calls=len(models),
+        tokens=round1_tokens,
         sprint_id=sprint_dir.name,
         attempt=current_attempt,
     )
+
+    round1_verdicts = dict(verdicts)
+    evaluation_rounds = 1
+    round2_verdicts: dict[str, dict] | None = None
+
+    # --- Round 2 (only if verdicts conflict) ---
+    if check_verdict_conflict(verdicts):
+        # Budget gate: check cost limit before spending on round 2
+        if check_cost_limit(harness_state_path, config, pending_calls=len(models)):
+            print("[eval_dispatch] Round 2 skipped — cost limit would be exceeded, using round 1 results", file=sys.stderr)
+        else:
+            evaluation_rounds = 2
+            print("[eval_dispatch] Round 1 verdicts conflict — starting Round 2 cross-verification", file=sys.stderr)
+            round2_prompt = build_round2_prompt(prompt, round1_verdicts)
+            round2_verdicts = {}
+            round2_raw: dict[str, str] = {}
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
+                futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
+                for future in concurrent.futures.as_completed(futures):
+                    model_name, result, _raw = future.result()
+                    round2_verdicts[model_name] = result
+                    round2_raw[model_name] = _raw
+
+            round2_tokens = _calc_round_tokens(round2_raw, round2_verdicts, len(round2_prompt))
+
+            # Persist round-2 cost tracking
+            update_cost_tracking(
+                harness_state_path,
+                eval_calls=len(models),
+                tokens=round2_tokens,
+                sprint_id=sprint_dir.name,
+                attempt=current_attempt,
+            )
+
+            # Use round 2 verdicts only if quorum is maintained
+            round2_valid = {k: v for k, v in round2_verdicts.items() if v.get("verdict") != "error"}
+            if len(round2_valid) >= args.min_models:
+                verdicts = round2_verdicts
+            else:
+                print(f"[eval_dispatch] Round 2 quorum lost ({len(round2_valid)} valid < {args.min_models} required), using round 1 results", file=sys.stderr)
+    else:
+        print("[eval_dispatch] Round 1 unanimous — skipping Round 2", file=sys.stderr)
 
     # Compute consensus (pass known criteria from contract for missing-criterion detection)
     known_criteria = parse_acceptance_criteria(contract)
