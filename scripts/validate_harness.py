@@ -1100,8 +1100,32 @@ def check_anti_rationalization() -> None:
     except json.JSONDecodeError:
         return
 
-    content = tool_input.get("new_string") or tool_input.get("content") or ""
-    if not content:
+    # Reconstruct the post-edit file state
+    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
+
+    # For Write tool: content IS the full file
+    # For Edit tool: reconstruct by applying old_string->new_string on disk content
+    new_string = tool_input.get("new_string", "")
+    old_string = tool_input.get("old_string", "")
+    write_content = tool_input.get("content", "")
+
+    if write_content:
+        # Write tool — content is the complete file
+        post_edit_content = write_content
+    elif new_string and gen_report_path.exists():
+        # Edit tool — reconstruct post-edit state
+        try:
+            disk_content = gen_report_path.read_text(encoding="utf-8")
+            if old_string:
+                post_edit_content = disk_content.replace(old_string, new_string, 1)
+            else:
+                post_edit_content = disk_content + "\n" + new_string
+        except OSError:
+            post_edit_content = new_string
+    else:
+        post_edit_content = new_string or write_content
+
+    if not post_edit_content:
         return
 
     # Find "Unresolved Issues" section and check for rationalized ACs
@@ -1109,7 +1133,7 @@ def check_anti_rationalization() -> None:
     missing: list[str] = []
     in_unresolved = False
 
-    for line in content.splitlines():
+    for line in post_edit_content.splitlines():
         stripped = line.strip()
         if re.match(r"^#{1,4}\s+Unresolved", stripped, re.IGNORECASE):
             in_unresolved = True
@@ -1123,20 +1147,9 @@ def check_anti_rationalization() -> None:
                 if ac_id in stripped and _RATIONALIZATION_PATTERNS.search(stripped):
                     rationalized.append(ac_id)
 
-    # For AC coverage check, use full file from disk if available
-    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
-    full_content = content  # fallback to tool input
-    if gen_report_path.exists():
-        try:
-            full_content = gen_report_path.read_text(encoding="utf-8")
-            # Hook runs pre-tool, so merge existing file + new content
-            full_content = full_content + "\n" + content
-        except OSError:
-            pass
-
     # Check for ACs completely missing from the report
     for ac_id in ac_ids:
-        if ac_id not in full_content:
+        if ac_id not in post_edit_content:
             missing.append(ac_id)
 
     blocked: list[str] = []
