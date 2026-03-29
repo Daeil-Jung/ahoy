@@ -70,18 +70,22 @@ class SensitiveDataMasker:
         self._patterns = list(_SENSITIVE_PATTERNS)
         if extra_patterns:
             for ep in extra_patterns:
-                self._patterns.append((
-                    ep["category"],
-                    ep["mask_prefix"],
-                    re.compile(ep["regex"], re.IGNORECASE),
-                ))
+                try:
+                    category = ep["category"]
+                    prefix = ep["mask_prefix"]
+                    compiled = re.compile(ep["regex"], re.IGNORECASE)
+                    self._patterns.append((category, prefix, compiled))
+                except (KeyError, re.error) as exc:
+                    print(f"[eval_dispatch] WARNING: Skipping invalid masking pattern: {exc}", file=sys.stderr)
 
     def mask(self, text: str) -> str:
         """Replace sensitive data with [MASKED_*] tokens. Preserves line count."""
         result = text
         for _category, prefix, pattern in self._patterns:
             for match in pattern.finditer(result):
-                original = match.group(0)
+                # Prefer capture group 1 (just the secret value) when available;
+                # fall back to full match for patterns without capture groups.
+                original = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
                 existing = [k for k, v in self._mask_map.items() if v == original]
                 if existing:
                     token = existing[0]
