@@ -71,21 +71,32 @@ class SensitiveDataMasker:
         if extra_patterns:
             for ep in extra_patterns:
                 try:
+                    if not isinstance(ep, dict):
+                        print(f"[eval_dispatch] WARNING: Skipping non-dict masking pattern: {type(ep)}", file=sys.stderr)
+                        continue
                     category = ep["category"]
                     prefix = ep["mask_prefix"]
                     compiled = re.compile(ep["regex"], re.IGNORECASE)
                     self._patterns.append((category, prefix, compiled))
-                except (KeyError, re.error) as exc:
+                except (KeyError, re.error, TypeError) as exc:
                     print(f"[eval_dispatch] WARNING: Skipping invalid masking pattern: {exc}", file=sys.stderr)
 
     def mask(self, text: str) -> str:
         """Replace sensitive data with [MASKED_*] tokens. Preserves line count."""
-        result = text
+        # Collect all matches with their positions
+        replacements: list[tuple[int, int, str]] = []  # (start, end, token)
+
         for _category, prefix, pattern in self._patterns:
-            for match in pattern.finditer(result):
-                # Prefer capture group 1 (just the secret value) when available;
-                # fall back to full match for patterns without capture groups.
-                original = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
+            for match in pattern.finditer(text):
+                # Prefer capture group (just the secret) over full match
+                if match.lastindex and match.lastindex >= 1:
+                    original = match.group(1)
+                    start, end = match.start(1), match.end(1)
+                else:
+                    original = match.group(0)
+                    start, end = match.start(0), match.end(0)
+
+                # Reuse existing token for same literal
                 existing = [k for k, v in self._mask_map.items() if v == original]
                 if existing:
                     token = existing[0]
@@ -94,7 +105,17 @@ class SensitiveDataMasker:
                     self._counter[prefix] = idx + 1
                     token = f"[{prefix}_{idx}]"
                     self._mask_map[token] = original
-                result = result.replace(original, token, 1)
+
+                replacements.append((start, end, token))
+
+        # Sort by position descending so replacements don't shift earlier offsets
+        replacements.sort(key=lambda r: r[0], reverse=True)
+
+        # Apply replacements
+        result = text
+        for start, end, token in replacements:
+            result = result[:start] + token + result[end:]
+
         return result
 
     def get_mask_report(self) -> list[dict]:
