@@ -8,10 +8,6 @@
     "codex": "accuracy_coverage",
     "gemini": "security_edge"
   },
-  "cost_limit": {
-    "max_eval_calls": 100,
-    "max_tokens": 500000
-  },
   "sensitive_data_masking": {
     "enabled": true,
     "extra_patterns": []

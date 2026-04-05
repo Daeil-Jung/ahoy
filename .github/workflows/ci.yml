@@ -26,4 +26,4 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Run test suite
-        run: uv run --no-project --with pytest --with pytest-cov pytest
+        run: uv run pytest

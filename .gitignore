@@ -19,6 +19,7 @@ build/
 *.egg
 .venv/
 venv/
+.uv-cache/
 .coverage
 .pytest_cache/
 
@@ -34,6 +35,9 @@ docs/research-report/
 # Secrets
 .env
 .env.*
+
+# Lock files
+uv.lock
 
 # Temporary files
 *.tmp
