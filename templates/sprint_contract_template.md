@@ -15,7 +15,7 @@ depends_on: [{{depends_on}}]
 
 {{acceptance_criteria}}
 
-## Scope
+## Implementation Scope
 
 ### Files to Create
 
