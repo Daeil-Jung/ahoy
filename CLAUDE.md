@@ -44,8 +44,7 @@ Hooks in `hooks/hooks.json` use `${CLAUDE_PLUGIN_ROOT}` paths. Key guards:
 
 - Hook enforcement uses `validate_harness.py`, so Python 3.10+ is required for full enforcement.
 - `issues.json` is the source of truth for evaluation. `verdict` explains model consensus; `status_action` tells the orchestrator whether the sprint may move to `passed`.
-- **pre-commit** — runs spec.md test_command, blocks on failure
-- **pre-push** — tests + verdict consistency for all passed sprints
+- **circuit-breaker** — detects repeated failure patterns across rework attempts (runs post-eval)
 
 ## Workspace (generated in target project)
 
