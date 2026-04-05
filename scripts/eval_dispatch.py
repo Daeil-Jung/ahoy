@@ -24,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -921,15 +922,37 @@ def main() -> int:
     print(f"[eval_dispatch] Evaluation models: {models} (parallel calls)", file=sys.stderr)
     verdicts: dict[str, dict] = {}
 
-    def _call_and_parse(model: str, eval_prompt: str) -> tuple[str, dict]:
+    def _call_and_parse(model: str, eval_prompt: str) -> tuple[str, dict, dict]:
+        """Call a single model and parse JSON response. Returns (model, parsed, cost_entry)."""
+        start = time.monotonic()
         print(f"[eval_dispatch] Calling {model}...", file=sys.stderr)
         raw = call_model(model, eval_prompt, timeout=args.timeout)
         parsed = extract_json(raw)
+        duration = time.monotonic() - start
+        raw_len = len(raw) if isinstance(raw, str) else 0
         if parsed:
             parsed = validate_objections(parsed, model)
             print(f"[eval_dispatch] {model} verdict: {parsed.get('verdict')}", file=sys.stderr)
-            return model, parsed
+            cost_entry = {
+                "model": model,
+                "input_chars": len(eval_prompt),
+                "output_chars": raw_len,
+                "input_tokens_est": len(eval_prompt) // 4,
+                "output_tokens_est": raw_len // 4,
+                "duration_s": round(duration, 2),
+                "success": parsed.get("verdict") != "error",
+            }
+            return model, parsed, cost_entry
         print(f"[eval_dispatch] {model} raw output (first 500): {raw[:500]}", file=sys.stderr)
+        cost_entry = {
+            "model": model,
+            "input_chars": len(eval_prompt),
+            "output_chars": raw_len,
+            "input_tokens_est": len(eval_prompt) // 4,
+            "output_tokens_est": raw_len // 4,
+            "duration_s": round(duration, 2),
+            "success": False,
+        }
         return model, {
             "verdict": "error",
             "error": f"JSON parsing failed. Raw: {raw[:300]}",
@@ -937,13 +960,17 @@ def main() -> int:
             "passed_criteria": [],
             "failed_criteria": [],
             "summary": "Response parsing failed",
-        }
+        }, cost_entry
 
+    cost_entries: list[dict] = []
+    wall_start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {executor.submit(_call_and_parse, m, model_prompts[m]): m for m in models}
         for future in concurrent.futures.as_completed(futures):
-            model_name, result = future.result()
+            model_name, result, cost_entry = future.result()
             verdicts[model_name] = result
+            cost_entries.append(cost_entry)
+    wall_end = time.monotonic()
 
     # Compute consensus
     known_criteria = parse_acceptance_criteria(contract)
@@ -983,6 +1010,15 @@ def main() -> int:
 
     if masker and masker.masked_count > 0:
         result["masking_report"] = masker.get_mask_report()
+
+    # Cost summary (observational — does not affect verdict/consensus)
+    result["cost_summary"] = {
+        "entries": cost_entries,
+        "total_input_tokens_est": sum(e["input_tokens_est"] for e in cost_entries),
+        "total_output_tokens_est": sum(e["output_tokens_est"] for e in cost_entries),
+        "total_duration_s": round(sum(e["duration_s"] for e in cost_entries), 2),
+        "wall_duration_s": round(wall_end - wall_start, 2),
+    }
 
     write_result(sprint_dir, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))

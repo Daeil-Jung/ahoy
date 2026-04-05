@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -966,3 +967,99 @@ def test_backpressure_gate_infra_no_stdout(monkeypatch: pytest.MonkeyPatch, tmp_
     assert result_type == "infra_error"
     assert passed is False
     assert "command not found" in output
+
+
+# --- Cost tracking tests ---
+
+
+def test_cost_token_estimation():
+    """Token estimation is chars // 4."""
+    prompt = "x" * 400
+    assert len(prompt) // 4 == 100
+
+
+def test_main_includes_cost_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Full main() produces result with cost_summary."""
+    sprint_dir = tmp_path / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+
+    contract = (
+        "## Acceptance Criteria\n"
+        "- AC-001: Login endpoint returns 200\n"
+        "## Implementation Scope\n"
+        "### Files to Create\n"
+        "- `src/auth.py`\n"
+    )
+    (sprint_dir / "contract.md").write_text(contract, encoding="utf-8")
+
+    gen_report = "### Files Created\n- `src/auth.py`\n"
+    (sprint_dir / "gen_report.md").write_text(gen_report, encoding="utf-8")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "auth.py").write_text("def login(): return 200\n", encoding="utf-8")
+
+    def fake_call_model(model, prompt, timeout=600):
+        return json.dumps({
+            "verdict": "pass",
+            "objections": ["none"],
+            "criteria_results": [{"criterion_id": "AC-001", "verdict": "pass", "evidence": "ok"}],
+            "issues": [],
+            "passed_criteria": ["AC-001"],
+            "failed_criteria": [],
+            "summary": "All good",
+        })
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude",
+         "--project-root", str(tmp_path), "--min-models", "2"],
+    )
+
+    exit_code = eval_dispatch.main()
+    assert exit_code == 0
+
+    issues = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert "cost_summary" in issues
+    cs = issues["cost_summary"]
+    assert "entries" in cs
+    assert len(cs["entries"]) == 2
+    assert cs["total_input_tokens_est"] > 0
+    assert cs["total_output_tokens_est"] > 0
+    assert cs["wall_duration_s"] >= 0
+    for entry in cs["entries"]:
+        assert "model" in entry
+        assert "input_chars" in entry
+        assert "duration_s" in entry
+        assert "success" in entry
+
+
+def test_cost_entry_on_model_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Even when model returns error, cost is still tracked."""
+    sprint_dir = tmp_path / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+
+    contract = "## Acceptance Criteria\n- AC-001: Something\n### Files to Create\n- `src/a.py`\n"
+    (sprint_dir / "contract.md").write_text(contract, encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Created\n- `src/a.py`\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+    def fake_call_model(model, prompt, timeout=600):
+        return "unparseable garbage"
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude",
+         "--project-root", str(tmp_path), "--min-models", "1"],
+    )
+
+    eval_dispatch.main()
+    issues = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert "cost_summary" in issues
+    for entry in issues["cost_summary"]["entries"]:
+        assert entry["success"] is False
+        assert entry["duration_s"] >= 0
