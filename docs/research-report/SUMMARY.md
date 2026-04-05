@@ -1,81 +1,86 @@
 # AHOY 하네스 리서치 누적 요약
 
-> 마지막 업데이트: 2026-03-29 (13차 — 전체 repo 스타 재조회, 구현 완료 항목은 개별 리포트에 반영)
+> 마지막 업데이트: 2026-04-05 (OpenHarness, revfactory/harness, agent-contracts, MS Agent Framework 추가)
 
-## 분석 완료 프로젝트
+## 카테고리별 정리
 
-| 프로젝트 | 스타 | 리포트 | 핵심 키워드 |
-|----------|------|--------|-------------|
-| Everything-Claude-Code | 115.0k | [리포트](everything-claude-code-report.md) | 28 에이전트, 125+ 스킬, Pass@k, DAG 실행 |
-| GitHub Spec Kit | 83.2k | [리포트](github-spec-kit-report.md) | Constitution, SDD 5단계, DAG 태스크, VS Code 확장, 멀티 에이전트 |
-| GStack | 54.3k | [리포트](gstack-report.md) | 역할 기반 페르소나, 스프린트 파이프라인, 크로스모델 리뷰 |
-| Oh-My-OpenAgent | 44.5k | [리포트](oh-my-openagent-report.md) | 멀티 에이전트 오케스트레이션, 모델 라우팅, Hash-Anchored Edit |
-| OpenSpec | 35.2k | [리포트](openspec-report.md) | Artifact-Guided SDD, Delta Spec, 21+ AI 도구, Archive 시스템 |
-| wshobson/agents | 32.5k | [리포트](wshobson-agents-report.md) | 112 에이전트, 72 플러그인, Agent Teams, Conductor, 5 워크플로우 |
-| Ruflo | 28.0k | [리포트](ruflo-report.md) | 스웜 오케스트레이션, BFT 컨센서스, 학습 루프, WASM 가속, MCP 네이티브 |
-| Deep Agents (LangChain) | 18.0k | [리포트](deepagents-report.md) | 서브에이전트 격리, 자동 컨텍스트 요약, write_todos, LangGraph |
-| Oh-My-Claudecode | 14.8k | [리포트](oh-my-claudecode-report.md) | 팀 모드, 7가지 실행 패턴, 비용 최적화 |
-| DeepEval | 14.3k | [리포트](deepeval-report.md) | LLM-as-Judge, G-Eval CoT, Agent 메트릭, Pytest 통합, DAG 평가 |
-| Qodo PR-Agent | 10.7k | [리포트](qodo-pr-agent-report.md) | 명령 기반 PR 리뷰, 적응형 토큰 압축, Severity 기반 정렬, Ticket Compliance |
-| Hive | 9.9k | [리포트](hive-report.md) | 체크포인트 복구, 4단계 격리, 비용 관리, 자동 진화, 100+ LLM |
-| LangChain Open SWE | 8.8k | [리포트](langchain-open-swe-report.md) | 미들웨어 시스템, 클라우드 샌드박스, 서브에이전트, 멀티채널 호출, LangSmith |
-| NeMo Guardrails | 5.9k | [리포트](nemo-guardrails-report.md) | Colang DSL, 5종 레일 체계, 비동기 우선, 서버 모드, LangChain 통합 |
-| Agent Orchestrator | 5.6k | [리포트](agent-orchestrator-report.md) | 플러그인 아키텍처, git worktree 격리, CI 피드백 |
-| GitHub Agentic Workflows | 4.2k | [리포트](github-agentic-workflows-report.md) | Safe Outputs, 3계층 보안, 컴파일 타임 검증, MCP Gateway, 위협 감지 |
-| Oh-My-Codex | 2.8k | [리포트](oh-my-codex-report.md) | 스마트 에스컬레이션, 역할 프롬프트, Deep Interview, Team 병렬 실행 |
-| EvoAgentX (EvoFSM) | 2.7k | [리포트](evoagentx-report.md) | 자기진화 FSM, Flow-Skill 분리, Critic 가이드 진화, 궤적 메모리, MCTS |
-| oh-my-pi | 2.4k | [리포트](oh-my-pi-report.md) | Hash-Anchored Edits, LSP 통합, 6 서브에이전트, P0-P3 Reviewer |
-| Claude Octopus | 2.2k | [리포트](claude-octopus-report.md) | 8 프로바이더, Double Diamond, 75% 컨센서스, Reaction Engine |
-| Snyk Agent Scan | 2.0k | [리포트](snyk-agent-scan-report.md) | MCP 보안 스캔, Tool Poisoning/Shadowing, 공급망 보안, 멀티 플랫폼 |
-| trailofbits claude-code-config | 1.7k | [리포트](trailofbits-claude-code-config-report.md) | Anti-Rationalization Gate, OS 샌드박싱, Mutation Audit, Deny Rules |
-| Overstory | 1.1k | [리포트](overstory-report.md) | SQLite 메일, 11 런타임 어댑터, 3-Tier Watchdog, 파일 스코프, Typed Protocol |
-| Attractor (StrongDM) | 1.0k | [리포트](attractor-report.md) | DOT 그래프, NLSpec, SessionEvent, 루프 감지, 스티어링 주입 |
-| Spec-Kitty | 976 | [리포트](spec-kitty-report.md) | 7단계 라이프사이클, git worktree 병렬, 칸반 대시보드, 오케스트레이터 API |
-| CCManager | 968 | [리포트](ccmanager-report.md) | 멀티 에이전트 세션 관리, 8+ 에이전트, Git Worktree, 상태 감지 Hook |
-| MassGen | 898 | [리포트](massgen-report.md) | 집단 정제 컨센서스, 상호 관찰, Circuit Breaker, Textual TUI, 체크포인트 |
-| Claudekit | 638 | [리포트](claudekit-report.md) | 6-에이전트 병렬 리뷰, 20+ 서브에이전트, Git 체크포인트, Codebase Map |
-| Invariant Guardrails | 402 | [리포트](invariant-guardrails-report.md) | 플로우 기반 DSL, MCP/LLM 프록시, 비침투적 배포, 내장 보안 함수 |
-| Claude Code Harness | 345 | [리포트](claude-code-harness-report.md) | 5-Verb 워크플로우, TS 가드레일 엔진, 4관점 리뷰, Agent Trace, 병렬 워커 |
-| OpenGuardrails | 322 | [리포트](openguardrails-report.md) | 10종 스캐너, 행동 패턴 체인, Intent-Action Mismatch, AI Security Gateway |
-| HAL Harness (Princeton) | 248 | [리포트](hal-harness-report.md) | 표준화된 평가, 신뢰성 대시보드, 비용 추적, ICLR 2026 |
-| Sondera Coding Agent Hooks | 167 | [리포트](sondera-coding-agent-hooks-report.md) | Cedar Policy, Rust Hook, Cross-Agent, YARA, Reference Monitor |
-| metaswarm | 162 | [리포트](metaswarm-report.md) | 9단계 SDLC, 5인 설계 리뷰, 크로스 모델, TDD 강제, 자기 학습 |
-| OpenSWE (GAIR-NLP) | 158 | [리포트](openswe-gair-report.md) | 품질 필터링 파이프라인, 난이도 분류, Docker 격리, 45K 환경, SWE-bench SOTA |
-| Strands Agents Evals | 95 | [리포트](strands-agents-evals-report.md) | LLM-as-Judge, 5종 평가, 궤적 분석, ActorSimulator, OpenTelemetry |
-| Liza | 88 | [리포트](liza-report.md) | 적대적 페어링, 55+ 실패 모드, Go 결정론적 감독, YAML 블랙보드, 9 역할 |
-| Rulebricks Guardrails | 62 | [리포트](rulebricks-guardrails-report.md) | 클라우드 Hook, 비주얼 규칙 에디터, 실시간 업데이트, 감사 로그 |
-| agentic-guardrails | 35 | [리포트](agentic-guardrails-report.md) | 3계층 방어, LangGraph ReAct, 비동기 병렬 입력, 모델 계층화, HITL 에스컬레이션 |
-| agent-guardrails-template | 32 | [리포트](agent-guardrails-template-report.md) | 4대 법칙, MCP 서버 Go, 17 도구, 토큰 효율, 멀티 도메인 가드레일 |
-| Network-AI | 30 | [리포트](network-ai-report.md) | LockedBlackboard, FSM 거버넌스, 17 어댑터, HMAC 감사, 토큰 예산 |
-| duh | 25 | [리포트](duh-consensus-engine-report.md) | 4단계 컨센서스, 강제 반박, 아첨 감지 |
-| agentic-sprint | 16 | [리포트](agentic-sprint-report.md) | spec-driven 상태머신, 수렴 루프, 에이전트 전문화, Second Brain |
-| MAGIS Framework | 11 | [리포트](magis-framework-report.md) | 4-에이전트 역할 분리, Repository Custodian, SWE-bench, Redis 캐싱 |
-| dwarvesf claude-guardrails | 9 | [리포트](dwarvesf-claude-guardrails-report.md) | 5계층 방어, Lite/Full 변형, 수술적 설치, Deny Rules, 프롬프트 인젝션 방어 |
-| Aragora (Synaptent) | 6 | [리포트](aragora-report.md) | Propose/Critique/Revise, Trickster, ELO, 4-Tier Memory, 9+ LLM |
-| Adversarial Review | 4 | [리포트](adversarial-review-report.md) | 4단계 적대적 토론, Claude+Codex 교차 리뷰, 서킷 브레이커, 신뢰도 등급 |
-| Atlas Guardrails | 3 | [리포트](atlas-guardrails-report.md) | 심볼 인덱싱, 컨텍스트 패킹, 중복 방지, API Drift Detection, MCP 서버 |
-| Agent Eval Harness | 2 | [리포트](agent-eval-harness-report.md) | Unix 파이프라인, pass@k, 궤적 캡처, Git 그레이딩, 스키마 어댑터 |
-| coding-agent-eval | 0 | [리포트](coding-agent-eval-report.md) | 다중 CLI 에이전트 벤치마크, 자동 테스트 감지, HTML 리포트 |
-| The Star Chamber | - | [리포트](star-chamber-report.md) | Multi-LLM 컨센서스, Debate Mode, 3단계 분류 |
-| AgentSpec | - | [리포트](agentspec-report.md) | 런타임 강제 DSL, 다중 강제 메커니즘, 규칙 충돌 감지 |
-| SentinelOne Gauntlet | - | [리포트](sentinelone-gauntlet-report.md) | 3단계 파이프라인, Active Rejection Mandate, 역순 재검증, 결정론적 브릿지 |
+| 카테고리 | 프로젝트 수 | 파일 |
+|----------|------------|------|
+| 가드레일 & 보안 | 16 | [category-guardrails-security.md](category-guardrails-security.md) |
+| 평가 & 벤치마크 | 10 | [category-evaluation-benchmark.md](category-evaluation-benchmark.md) |
+| 컨센서스 & 적대적 검증 | 7 | [category-consensus-debate.md](category-consensus-debate.md) |
+| 에이전트 오케스트레이션 프레임워크 | 20 | [category-orchestration-frameworks.md](category-orchestration-frameworks.md) |
+| 스웜 & 분산 멀티에이전트 | 13 | [category-swarm-distributed.md](category-swarm-distributed.md) |
+| 스펙 기반 개발 & 계획 | 4 | [category-spec-driven-dev.md](category-spec-driven-dev.md) |
+| Claude Code 생태계 확장 | 8 | [category-claude-code-ecosystem.md](category-claude-code-ecosystem.md) |
 
-> 총 **54개 프로젝트** 분석 완료 (스타 합계: 약 630k+)
+---
+
+## 분석 완료 프로젝트 (78개, 스타 합계 약 766k+)
+
+> 개별 리포트는 카테고리 파일로 통합 완료 (2026-04-05)
+
+### 오케스트레이션 프레임워크 (20개) → [상세](category-orchestration-frameworks.md)
+
+Everything-Claude-Code (115k) · GStack (54.3k) · Oh-My-OpenAgent (44.5k) · BMAD-METHOD (42.8k) · wshobson/agents (32.5k) · AgentScope (22.9k) · Deep Agents (18k) · Oh-My-Claudecode (14.8k) · Hive (9.9k) · **MS Agent Framework (8.9k)** · LangChain Open SWE (8.8k) · ARIS (5.4k) · **OpenHarness (4.5k)** · Oh-My-Codex (2.8k) · EvoAgentX (2.7k) · ralph-orchestrator (2.4k) · oh-my-pi (2.4k) · Attractor (1.0k) · Claude MPM (97) · agentic-sprint (16)
+
+### 가드레일 & 보안 (16개) → [상세](category-guardrails-security.md)
+
+Goose (33.8k) · NeMo Guardrails (5.9k) · GitHub Agentic Workflows (4.2k) · Snyk Agent Scan (2.0k) · trailofbits (1.7k) · Invariant Guardrails (402) · OpenGuardrails (322) · lasso-claude-hooks (187) · Sondera Hooks (167) · Rulebricks (62) · agentic-guardrails (35) · agent-guardrails-template (32) · parry-guard (27) · dwarvesf (9) · Atlas Guardrails (3) · AgentSpec
+
+### 스웜 & 분산 멀티에이전트 (13개) → [상세](category-swarm-distributed.md)
+
+Ruflo (28k) · ClawTeam (4.3k) · Overstory (1.1k) · Spec-Kitty (976) · CCManager (968) · MassGen (898) · Quoroom (670) · OpenSwarm (305) · metaswarm (162) · ccswarm (132) · Liza (88) · Network-AI (30) · MAGIS (11) · Conclave
+
+### 평가 & 벤치마크 (10개) → [상세](category-evaluation-benchmark.md)
+
+DeepEval (14.3k) · Qodo PR-Agent (10.7k) · AgentSys (687) · HAL Harness (248) · OpenSWE (158) · Strands Evals (95) · kodo (53) · SwingArena (12) · Agent Eval Harness (2) · coding-agent-eval (0)
+
+### 컨센서스 & 적대적 검증 (7개) → [상세](category-consensus-debate.md)
+
+Claude Octopus (2.2k) · MassGen (898) · duh (25) · Aragora (6) · Adversarial Review (4) · Star Chamber · SentinelOne Gauntlet
+
+### Claude Code 생태계 (8개) → [상세](category-claude-code-ecosystem.md)
+
+Agent Orchestrator (5.6k) · revfactory/harness (1.9k) · Claude-Code-Workflow (1.6k) · Claudekit (638) · Citadel (406) · Claude Code Harness (345) · claude-code-skills (282) · ORCH (13)
+
+### 스펙 기반 개발 & 계약 (4개) → [상세](category-spec-driven-dev.md)
+
+GitHub Spec Kit (83.2k) · OpenSpec (35.2k) · GitAgent (2.4k) · agent-contracts (17)
 
 ## 미분석 프로젝트
 
 | 프로젝트 | 스타 | 사유 |
 |----------|------|------|
 | bigcode-evaluation-harness | 1,024 | 코드 생성 LM 평가, HumanEval/MBPP/APPS — 코딩 에이전트가 아닌 LM 벤치마크 |
-| lasso-security/claude-hooks | 184 | PostToolUse 인젝션 감지, 보안 통합 |
-| vaporif/parry-guard | 27 | Rust DeBERTa/Llama 프롬프트 인젝션 스캐너, Claude Code Hook |
 | mafiaguy/claude-security-guardrails | - | dwarvesf와 유사, 우선순위 낮음 |
+| josephsenior/langgraph-workflow-orchestrator | 2 | LangGraph 기반 상태 머신, 체크포인트 복구, HITL — 소규모, 우선순위 낮음 |
+| IntelLabs/LLMart | - | LLM 적대적 강건성 툴킷, 병렬 레드팀 공격, PyTorch 기반 |
+| Danau5tin/multi-agent-coding-system | - | Terminal Bench #13, 오케스트레이터+탐색기+코더 에이전트, 컨텍스트 공유 |
+| Mixture-of-Models (논문) | - | 동적 전문성 브로커, 이차 투표(quadratic voting) 컨센서스, 소형 모델 앙상블 |
+| gnap (Git-Native Agent Protocol) | - | Git 리포를 태스크 보드로 사용, todo/doing/done, 감사 추적 |
+| swarm-protocol | - | 작업 클레임, 파일 충돌 감지, 하트비트, 핸드오프 조정 레이어 |
+| wit | - | Tree-sitter AST 기반 심볼 수준 락, 충돌 경고 |
+| claude-code-swarm (rekpero) | - | 24/7 Claude Code 스웜, GitHub 이슈 감시→자동 구현 |
+| AEMA (Verifiable Eval Framework) | - | 프로세스 인식 감사 가능 다중 에이전트 평가, 인간 감독 |
+| cyberark/agentic-code-review-demo | - | 에이전틱 AI 위협 모델링, 코드 리뷰 보안 데모 |
+| Superagent (superagent-ai) | - | 런타임 에이전트 보호, 프롬프트 인젝션/PII 방어, Safety Agent, 감사 로그 |
+| ~~Microsoft Agent Framework~~ | 8.9k | ✅ 분석 완료 (2026-04-05) |
+| ComposioHQ/agent-orchestrator | - | 병렬 코딩 에이전트, CI 수정 자동화, 머지 충돌 해결, 코드 리뷰 |
+| RepoAI (Multi-Agent Refactoring) | - | 크로스 패밀리 LLM 검증, RAG 컨텍스트, 의미 보존 분석, 임베딩 유사도 |
+| walkinglabs/awesome-harness-engineering | - | 하네스 엔지니어링 큐레이션, Harness Evolver 포함 |
+| 10xChengTu/harness-engineering | - | AI 에이전트용 하네스 엔지니어링 설정, AGENTS.md 생성 |
+| dynamiq-ai/dynamiq | 1,035 | RAG + LLM 에이전트 오케스트레이션, 그래프 워크플로우 |
+| guardrails-ai/guardrails | - | LLM 출력 구조화/검증, Validator Hub, 재시도 로직 |
+| MaxGfeller/open-harness | - | 코드 우선 composable SDK 에이전트 빌더 |
+| zhijiewong/openharness | - | 오픈소스 에이전트 하네스, 터미널 CLI + LLM |
+| shareAI-lab/learn-claude-code | - | nano agent harness, bash 기반 Claude Code 클론 교육용 |
+| panayiotism/claude-harness | - | Claude 전용 하네스 구현 |
 
 ---
 
-## 개선 제안 (미구현 항목만)
+## 개선 제안
 
-> 구현 완료된 제안은 해당 리포트에 `v0.2.0 구현 완료` 태그로 반영됨. 아래는 **아직 미구현인 항목**만 수록.
 
 ### Tier 1: 즉시 구현 가능 (프롬프트/Hook 수준)
 
@@ -86,6 +91,27 @@
 | T1-3 | **평가 관점 다차원화** | 모델별 관점 할당 (정확성/테스트 vs 보안/엣지케이스) | wshobson/agents |
 | T1-4 | **이슈 우선순위 표준화 (P0-P3)** | rework 시 P0/P1 우선 해결 지시 | oh-my-pi |
 | T1-5 | **Rework 전략 다양화** | rework 2회차에 이전과 다른 전략 강제 | wshobson/agents |
+| T1-6 | **Pre-Eval Backpressure Gate** | 외부 eval 전 test_command 자동 실행, 실패 시 eval 스킵 → 즉시 rework | ralph-orchestrator |
+| T1-7 | **스케일 적응형 Contract 깊이** | 태스크 복잡도 자동 판별 → minor/standard/complex 3단계 contract | BMAD-METHOD |
+| T1-8 | **Fast-Advance Trivial Sprint** | trivial 스프린트는 외부 eval 스킵, test_command만으로 passed | Claude-Code-Workflow |
+| T1-9 | **평가 Debate Protocol (크로스 검증)** | 모델 간 이슈 교차 검증, 불합의 시 우선순위 상향 | claude-code-skills |
+| T1-10 | **Wave 기반 병렬 스프린트** | 독립 스프린트를 wave로 묶어 병렬 실행, Bulletin Board로 지식 전달 | Conclave |
+| T1-11 | **Evaluator 적대적 테스트 생성** | 평가 모델에게 "이 코드를 깨뜨리는 테스트 작성" 지시 | SwingArena |
+| T1-12 | **Effort Level 기반 평가 깊이 조절** | effort: low/standard/high/max로 검증 엄격도 동적 조절, trivial은 test만으로 pass | kodo |
+| T1-13 | **선언적 Evaluator 정의 (YAML)** | evaluators/ 디렉토리에 YAML로 모델/관점/타임아웃 선언, 동적 로드 | GitAgent |
+| T1-14 | **DUTIES.md 역할 명세 문서** | Generator/Evaluator 금지 행동과 의무를 명시적 문서로 정의 | GitAgent |
+| T1-15 | **Pre-Eval Static Triage** | Certainty Level 기반 정적 분석, HIGH 확신 이슈는 eval 스킵 후 즉시 rework | AgentSys |
+| T1-16 | **Post-Gen Deslop Pass** | Generator 완료 후 AI 아티팩트(디버그 문/TODO/과잉 주석) 자동 제거, regex 기반 비용 0 | AgentSys |
+| T1-17 | **Contract Drift Detection** | contract.md AC 대비 실제 구현 diff 비교, 미매핑 변경사항 drift 보고 | AgentSys |
+| T1-18 | **StuckDetector (수렴 실패 감지)** | rework 간 issues.json 유사도 70%+ 시 전략 변경 강제, T2-8 서킷 브레이커 구현체 | OpenSwarm |
+| T1-19 | **3단계 평가 결정 (APPROVE/REVISE/REJECT)** | pass/fail 이진→3단계, REVISE는 경량 rework, REJECT는 전략 변경 | OpenSwarm |
+| T1-20 | **Exhaust-before-surrender 프로토콜** | rework 시 최소 2가지 다른 접근법 시도 후에만 포기/스킵 허용, Hook 강제 | ARIS |
+| T1-21 | **Nightmare Mode (정보 비대칭 제거)** | effort:max에서 Evaluator에게 전체 소스 코드 전달, 코드를 깨뜨리는 시나리오 요구 | ARIS |
+| T1-22 | **정량적 품질 점수 추적 (Quality Score Trend)** | Evaluator가 1-10 점수 부여, 점수 정체 시 StuckDetector 트리거, 하락 시 전략 변경 | ARIS |
+| T1-23 | **Contract Pathcondition (프로세스 제약)** | AC 외에 "어떻게" 만들어야 하는지 프로세스 제약 명시, Evaluator가 프로세스도 검증 | agent-contracts |
+| T1-24 | **Contract Progressive Disclosure** | contract.md를 핵심 AC + contract_refs/ 참조로 2-tier 분리, 토큰 30-40% 절감 | revfactory/harness |
+| T1-25 | **Eval 비용 추적 (토큰/비용 기록)** | eval 호출별 input/output 토큰 수 기록, eval_report.md에 Cost Summary 자동 생성 | OpenHarness |
+| T1-26 | **비동기 병렬 Eval 호출** | asyncio.gather()로 다수 모델 동시 호출, eval 시간 약 50% 단축 | OpenHarness |
 
 ### Tier 2: 안전장치 확장
 
@@ -94,6 +120,22 @@
 | T2-1 | **공허 합의 감지** | 모든 모델 pass + 이슈 0개 + 근거 유사도 85%+ 시 자동 재평가 | Aragora, duh |
 | T2-2 | **민감 데이터 마스킹** | 외부 평가 모델 전송 전 API키/credential 자동 치환 | OpenGuardrails, Snyk |
 | T2-3 | **스프린트 체크포인트 복구** | API 크래시/세션 종료 시 자동 복원 확장 | Hive |
+| T2-4 | **Generator 입력 인젝션 방어** | PostToolUse Hook으로 외부 콘텐츠 인젝션 패턴 스캔 | lasso-claude-hooks |
+| T2-5 | **하네스 메타파일 무결성 검증** | contract.md/spec.md 수정 감시, Generator 조작 차단 | parry-guard |
+| T2-6 | **Fail-Closed 파싱 강화** | 외부 모델 응답 파싱 실패 시 verdict=error 강제 | parry-guard |
+| T2-7 | **PostToolUse 해시 검증 Hook** | hex-line 패턴 이식, Read→Edit 사이 파일 변경 시 차단 | claude-code-skills |
+| T2-8 | **실패 패턴 기반 동적 서킷 브레이커** | 동일 이슈 70%+ 반복 시 조기 중단, 새 이슈면 attempt 확장 | Citadel |
+| T2-9 | **CORS 기반 도구 호출 출처 추적** | 외부 파일 Read 직후 하네스 파일 Edit 차단 (출처 체인 분석) | Goose |
+| T2-10 | **평가 결과 컨텍스트 요약화** | rework 시 eval 원문 대신 구조화 요약만 전달, 자기 합리화 방지 | Goose |
+| T2-11 | **Compliance 디렉토리 (민감 데이터 정책)** | compliance/data-masking.yaml로 마스킹 규칙 관리 | GitAgent |
+| T2-12 | **동적 컨텍스트 Handoff (Auto-Pause)** | 3스프린트 고정 대신 컨텍스트 70%/85%/95% 임계값 기반 동적 handoff | Claude MPM |
+| T2-13 | **스프린트 의존성 그래프 + 자동 해제** | depends_on 배열로 의존성 추적, 의존 스프린트 passed 시 자동 planned 전이 | ClawTeam |
+| T2-14 | **CLI 어댑터 기반 Evaluator 추상화** | 공통 인터페이스로 eval 모델 추가를 YAML 1줄로, T1-13과 통합 | ClawTeam |
+| T2-15 | **HITL Review Gate (고위험 스프린트)** | risk_level=high 시 외부 eval 후 인간 확인 대기 | Quoroom |
+| T2-16 | **Evaluator Dynamic Pool (MsgHub 패턴)** | 스프린트 태그에 따라 관련 Evaluator만 동적 참여, min_required 유지 | AgentScope |
+| T2-17 | **Interrupt-Resume 스냅샷** | generated 진입 시 snapshot.json 자동 생성, 세션 복구 시 정확한 재개 지점 결정 | AgentScope |
+| T2-18 | **Precondition 자동 검증 Hook** | pre-gen에서 test_command 실행 + 대상 파일 존재 + 이전 스프린트 상태 확인 | agent-contracts |
+| T2-19 | **시나리오 기반 Eval (정상/엣지/에러)** | contract.md에 Eval Scenarios 섹션, 시나리오별 분리 프롬프트 전달 | agent-contracts |
 
 ### Tier 3: 워크플로우 개선
 
@@ -104,6 +146,14 @@
 | T3-3 | **Constitution (상위 제약)** | .ahoy/constitution.md로 프로젝트 불변 원칙 정의 | GitHub Spec Kit |
 | T3-4 | **Git 체크포인트 기반 Rework** | generated 진입 시 자동 git tag | Claudekit |
 
+### Tier 3.5: 오케스트레이션 패턴
+
+| ID | 에픽 | 내용 | 출처 |
+|----|------|------|------|
+| T3-5 | **스프린트 DAG 의존성 그래프** | depends_on 배열 + Fan-out/Fan-in 패턴, 독립 스프린트 병렬, 의존 스프린트 자동 대기 | MS Agent Framework, revfactory/harness |
+| T3-6 | **도메인 복잡도 자동 분류기** | plan 단계에서 simple/standard/complex/expert 자동 분류, 복잡도별 contract 깊이 결정 | revfactory/harness |
+| T3-7 | **오케스트레이션 패턴 선택기** | 의존성 그래프 분석 → Pipeline/Fan-out/Producer-Reviewer 자동 선택 | revfactory/harness |
+
 ### Tier 4: 인프라/관찰성
 
 | ID | 에픽 | 내용 | 출처 |
@@ -111,6 +161,11 @@
 | T4-1 | **Agent Trace** | 모든 상태전이/Hook/평가를 JSONL로 캡처 | Claude Code Harness, Attractor, HAL Harness |
 | T4-2 | **평가 모델 어댑터** | evaluators/ 디렉토리에 인터페이스 기반 평가자 구현 | Agent Orchestrator, Agent Eval Harness |
 | T4-3 | **스프린트 대시보드** | Rich/Textual 기반 터미널 시각화 | Oh-My-Claudecode, MassGen |
+| T4-4 | **JSONL Agent Trace + 뷰어** | 모든 이벤트를 trace.jsonl에 기록, Rich 기반 뷰어 | kodo, ORCH |
+| T4-5 | **이벤트 버스 패턴** | Typed Event Bus로 상태전이/Hook/평가 디커플링 | ORCH |
+| T4-6 | **Evaluator 상속 패턴** | base-evaluator.yaml 공통 속성 → 모델별 override 상속 | Claude MPM |
+| T4-7 | **경량 JSONL Trace + jq 분석** | 풀 OpenTelemetry 대신 trace.jsonl에 상태전이/Hook/eval 이벤트 기록, jq로 분석 | MS Agent Framework, OpenHarness |
+| T4-8 | **스프린트 체크포인트 자동화 (git tag)** | generated 진입 시 자동 git tag + 파일 해시 스냅샷, rework 시 클린 복원 | MS Agent Framework |
 
 ---
 
@@ -131,6 +186,8 @@
 | **4-Tier Memory** | "file-based communication, no memory dependency" 위반 | Aragora |
 | **Nomic Loop** | 하네스 자기 수정 = "AI가 자기 평가" 상위 버전 | Aragora |
 | **실패 기반 자동 진화** | 학습 루프와 동일 문제 | Hive |
+| **Self-modification + 완전 복원** | 하네스 자기 수정은 "AI가 자기 평가" 상위 버전 | Quoroom |
+| **인지 메모리 (벡터 임베딩)** | 암묵적 기대 추가, contract 외 정보 의존 | OpenSwarm, Quoroom |
 
 ### 플러그인 아키텍처 제약 위반
 
@@ -153,18 +210,4 @@
 | HMAC 서명 감사 로그 | 로컬에서 변조 방지는 과잉 설계 |
 | YARA 기반 사전 스캐닝 | 의존성 대비 효용 불명확 |
 | Textual TUI 대시보드 | 비핵심 UX |
-
----
-
-## 우선순위 Top 10
-
-1. **T1-1 Anti-Rationalization Gate** — Generator 자기합리화 방어
-2. **T1-2 Stale-Read 감지** — 파일 해시 비교
-3. **T1-3 평가 관점 다차원화** — 모델별 관점 할당
-4. **T1-4 이슈 우선순위 P0-P3** — rework 효율화
-5. **T2-1 공허 합의 감지** — rolling pass rate + 근거 유사도
-6. **T1-5 Rework 전략 다양화** — 이전과 다른 접근법 강제
-7. **T2-2 민감 데이터 마스킹** — credential 자동 치환
-8. **T3-1 Delta Contract** — rework 토큰 절감
-9. **T3-2 설계 리뷰 게이트** — planned→contracted 품질 검증
-10. **T4-1 Agent Trace** — 상태전이/Hook/평가 JSONL 캡처
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
