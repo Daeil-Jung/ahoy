@@ -497,3 +497,21 @@ def test_main_dispatches_known_check(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 def test_checks_dict_contains_all_six_checks():
     expected = {"guard-eval-files", "pre-gen", "pre-state-write", "post-eval", "post-state-write", "circuit-breaker"}
     assert set(validate_harness.CHECKS.keys()) == expected
+
+
+# ── Backpressure Gate validate tests ─────────────────────────────
+
+
+def test_post_eval_allows_backpressure_test_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    payload = issue_payload(verdict="fail", status_action="failed", models_valid=[])
+    payload["backpressure_gate"] = {
+        "result_type": "test_result",
+        "test_command": "pytest",
+        "output": "1 failed",
+    }
+    write_issues(tmp_path, payload)
+
+    # Should NOT raise — backpressure gate test failure is allowed to pass through
+    validate_harness.check_post_eval()

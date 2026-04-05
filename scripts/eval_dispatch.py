@@ -771,6 +771,70 @@ def load_config() -> dict:
     return config
 
 
+def parse_eval_strategy(spec_path: Path) -> dict:
+    """Parse eval_strategy YAML block from spec.md.
+
+    The YAML is inside a fenced code block (```yaml ... ```).
+    Uses regex to extract test_command without requiring pyyaml dependency.
+    Returns dict with at least 'test_command' key, or empty dict.
+    """
+    try:
+        content = spec_path.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return {}
+
+    # Try to find a ```yaml ... ``` block first
+    yaml_match = re.search(r"```ya?ml\s*\n(.*?)```", content, re.DOTALL)
+    search_text = yaml_match.group(1) if yaml_match else content
+
+    result: dict = {}
+    tc_match = re.search(r'test_command:\s*"([^"]*)"', search_text)
+    if tc_match:
+        result["test_command"] = tc_match.group(1)
+    return result
+
+
+def run_backpressure_gate(
+    test_command: str, project_root: Path, timeout: int = 120,
+) -> tuple[str, bool, str]:
+    """Run test_command via subprocess before external model evaluation.
+
+    Returns (result_type, passed, output):
+      - FileNotFoundError       -> ("infra_error", False, "command not found: ...")
+      - subprocess.TimeoutExpired -> ("infra_error", False, "timeout after {timeout}s")
+      - exit != 0 + stdout present -> ("test_result", False, stdout+stderr[:2000])
+      - exit != 0 + no stdout, only stderr -> ("infra_error", False, stderr[:2000])
+      - exit == 0               -> ("test_result", True, stdout[:2000])
+    """
+    try:
+        proc = subprocess.run(
+            test_command,
+            shell=True,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        return ("infra_error", False, f"command not found: {exc}")
+    except subprocess.TimeoutExpired:
+        return ("infra_error", False, f"timeout after {timeout}s")
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+
+    if proc.returncode == 0:
+        return ("test_result", True, stdout[:2000])
+
+    # Non-zero exit
+    if stdout:
+        combined = (stdout + "\n" + stderr).strip()
+        return ("test_result", False, combined[:2000])
+
+    # No stdout, only stderr -> infra error
+    return ("infra_error", False, stderr[:2000])
+
+
 def main() -> int:
     config = load_config()
     default_models = ",".join(config.get("eval_models", ["codex", "claude"]))
@@ -820,6 +884,31 @@ def main() -> int:
 
     if masker and masker.masked_count > 0:
         print(f"[eval_dispatch] Sensitive data masking: {masker.masked_count} items masked", file=sys.stderr)
+
+    # --- Backpressure Gate ---
+    bp_config = config.get("backpressure_gate", {})
+    if bp_config.get("enabled", True):
+        spec_path = sprint_dir.parent.parent / "spec.md"
+        eval_strategy = parse_eval_strategy(spec_path)
+        test_cmd = eval_strategy.get("test_command", "")
+        if test_cmd:
+            bp_timeout = bp_config.get("timeout", 120)
+            result_type, passed, bp_output = run_backpressure_gate(test_cmd, project_root, bp_timeout)
+            if not passed:
+                if result_type == "infra_error":
+                    result = _error_result(sprint_dir, models, f"Backpressure gate infra error: {bp_output[:500]}")
+                else:
+                    result = _error_result(sprint_dir, models, "Pre-eval test_command failed (backpressure gate)")
+                    result["verdict"] = "fail"
+                    result["status_action"] = "failed"
+                result["backpressure_gate"] = {
+                    "result_type": result_type,
+                    "test_command": test_cmd,
+                    "output": bp_output[:2000],
+                }
+                write_result(sprint_dir, result)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 1
 
     # Build per-model prompts with perspectives
     perspectives = config.get("eval_perspectives", {})
