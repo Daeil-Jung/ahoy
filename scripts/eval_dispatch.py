@@ -546,6 +546,139 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path, masker: Sensitiv
     return "\n\n".join(snippets)
 
 
+DESLOP_PATTERNS: list[tuple[str, re.Pattern, str]] = [
+    ("debug_print", re.compile(
+        r"^\s*(print\(|console\.log\(|System\.out\.print|fmt\.Print)", re.MULTILINE
+    ), "Debug print/log statement"),
+    ("todo_fixme", re.compile(
+        r"(?:#|//)\s*(TODO|FIXME|HACK|XXX)\b", re.IGNORECASE | re.MULTILINE
+    ), "TODO/FIXME comment"),
+    ("placeholder_pass", re.compile(
+        r"^\s+pass\s*$", re.MULTILINE
+    ), "Placeholder 'pass' statement"),
+    ("placeholder_ellipsis", re.compile(
+        r"^\s+\.\.\.\s*$", re.MULTILINE
+    ), "Placeholder '...' statement"),
+]
+
+
+def run_deslop_scan(sprint_dir: Path, project_root: Path) -> list[dict]:
+    """Scan generated files for AI artifacts. Non-blocking, never raises."""
+    try:
+        gen_report_path = sprint_dir / "gen_report.md"
+        if not gen_report_path.exists():
+            return []
+        content = gen_report_path.read_text(encoding="utf-8")
+        files = resolve_reported_files(content)
+        if not files:
+            return []
+
+        resolved_root = project_root.resolve()
+        findings: list[dict] = []
+        for file_rel in files[:20]:
+            file_path = project_root / file_rel
+            try:
+                file_path.resolve().relative_to(resolved_root)
+            except ValueError:
+                continue
+            if not file_path.exists() or file_path.stat().st_size > 50_000:
+                continue
+            try:
+                code = file_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for line_num, line in enumerate(code.splitlines(), 1):
+                for pattern_name, pattern, description in DESLOP_PATTERNS:
+                    if pattern.search(line):
+                        findings.append({
+                            "file": file_rel,
+                            "line": line_num,
+                            "pattern": pattern_name,
+                            "description": description,
+                            "snippet": line.rstrip()[:200],
+                        })
+        return findings
+    except Exception:
+        return []
+
+
+def _parse_contract_file_scope(contract: str) -> set[str]:
+    """Parse 'Files to Create' and 'Files to Modify' from contract.md.
+    Reuses _extract_inventory_section() with contract headings."""
+    files = _extract_inventory_section(contract, "Files to Create")
+    files.extend(_extract_inventory_section(contract, "Files to Modify"))
+    return set(files)
+
+
+_DRIFT_NOISE = {".pyc", ".pyo", ".pyd", ".so", ".dll", ".class", ".o"}
+_DRIFT_NOISE_DIRS = {
+    "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules",
+    ".claude", ".git", "harness_state.json", "issues.json",
+}
+
+
+def _get_git_changed_files(project_root: Path) -> set[str]:
+    """Get actually changed files via git diff. Returns empty set on failure."""
+    try:
+        all_files: set[str] = set()
+        for cmd in (
+            ["git", "diff", "--name-only", "HEAD"],
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--name-only", "--cached"],
+        ):
+            result = subprocess.run(
+                cmd, cwd=project_root,
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    f = line.strip()
+                    if f:
+                        all_files.add(f)
+        # Filter noise
+        filtered: set[str] = set()
+        for f in all_files:
+            parts = Path(f).parts
+            ext = Path(f).suffix
+            if ext in _DRIFT_NOISE:
+                continue
+            if any(d in _DRIFT_NOISE_DIRS for d in parts):
+                continue
+            filtered.add(f)
+        return filtered
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return set()
+
+
+def run_contract_drift_check(
+    contract: str, sprint_dir: Path, project_root: Path,
+) -> dict:
+    """Compare contract scope vs actual changes. Non-blocking."""
+    contract_files = _parse_contract_file_scope(contract)
+    git_files = _get_git_changed_files(project_root)
+
+    source = "git"
+    actual_files = git_files
+    if not git_files:
+        # Fallback to gen_report
+        gen_report_path = sprint_dir / "gen_report.md"
+        if gen_report_path.exists():
+            content = gen_report_path.read_text(encoding="utf-8")
+            actual_files = set(resolve_reported_files(content))
+            source = "gen_report"
+
+    out_of_scope = sorted(actual_files - contract_files)
+    missing_impl = sorted(contract_files - actual_files)
+
+    return {
+        "sprint_id": sprint_dir.name,
+        "drift_detected": bool(out_of_scope or missing_impl),
+        "out_of_scope_files": out_of_scope,
+        "missing_impl_files": missing_impl,
+        "source": source,
+    }
+
+
 def has_blocker_or_major(issues: list[dict]) -> bool:
     return any(
         issue.get("severity") in {"blocker", "major"}
@@ -910,6 +1043,31 @@ def main() -> int:
                 write_result(sprint_dir, result)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 return 1
+
+    # --- Deslop Scan (pre-eval, informational) ---
+    deslop_findings = run_deslop_scan(sprint_dir, project_root)
+    if deslop_findings:
+        deslop_report = {
+            "sprint_id": sprint_dir.name,
+            "findings": deslop_findings,
+            "total_findings": len(deslop_findings),
+        }
+        (sprint_dir / "deslop_report.json").write_text(
+            json.dumps(deslop_report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"[eval_dispatch] Deslop scan: {len(deslop_findings)} AI artifacts found", file=sys.stderr)
+
+    # --- Contract Drift Detection (git-based, informational) ---
+    drift = run_contract_drift_check(contract, sprint_dir, project_root)
+    if drift["drift_detected"]:
+        (sprint_dir / "drift_report.json").write_text(
+            json.dumps(drift, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(
+            f"[eval_dispatch] Contract drift: {len(drift['out_of_scope_files'])} out-of-scope, "
+            f"{len(drift['missing_impl_files'])} missing (source: {drift['source']})",
+            file=sys.stderr,
+        )
 
     # Build per-model prompts with perspectives
     perspectives = config.get("eval_perspectives", {})

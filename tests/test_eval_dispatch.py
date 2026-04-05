@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1063,3 +1064,160 @@ def test_cost_entry_on_model_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     for entry in issues["cost_summary"]["entries"]:
         assert entry["success"] is False
         assert entry["duration_s"] >= 0
+
+
+# --- Deslop scan tests ---
+
+
+class TestDeslopScan:
+    def _setup_sprint(self, tmp_path, file_content, file_name="src/app.py"):
+        sprint_dir = tmp_path / ".claude" / "harness" / "sprints" / "sprint-001"
+        sprint_dir.mkdir(parents=True)
+        gen_report = f"### Files Created\n- `{file_name}`\n"
+        (sprint_dir / "gen_report.md").write_text(gen_report, encoding="utf-8")
+        src = tmp_path / file_name
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text(file_content, encoding="utf-8")
+        return sprint_dir
+
+    def test_deslop_detects_debug_print(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'def foo():\n    print("debug")\n    return 1\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert len(findings) == 1
+        assert findings[0]["pattern"] == "debug_print"
+        assert findings[0]["line"] == 2
+
+    def test_deslop_detects_todo_fixme(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'x = 1\n# TODO: fix this\ny = 2\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert len(findings) == 1
+        assert findings[0]["pattern"] == "todo_fixme"
+
+    def test_deslop_detects_placeholder_pass(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'class Foo:\n    pass\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert len(findings) == 1
+        assert findings[0]["pattern"] == "placeholder_pass"
+
+    def test_deslop_detects_placeholder_ellipsis(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'def bar():\n    ...\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert len(findings) == 1
+        assert findings[0]["pattern"] == "placeholder_ellipsis"
+
+    def test_deslop_returns_empty_for_clean_code(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'def add(a, b):\n    return a + b\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert findings == []
+
+    def test_deslop_handles_missing_gen_report(self, tmp_path):
+        sprint_dir = tmp_path / "sprint-001"
+        sprint_dir.mkdir(parents=True)
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert findings == []
+
+    def test_deslop_writes_report_json(self, tmp_path):
+        sprint_dir = self._setup_sprint(tmp_path, 'def f():\n    print("x")\n')
+        findings = eval_dispatch.run_deslop_scan(sprint_dir, tmp_path)
+        assert len(findings) > 0
+        report = {"sprint_id": sprint_dir.name, "findings": findings, "total_findings": len(findings)}
+        (sprint_dir / "deslop_report.json").write_text(json.dumps(report), encoding="utf-8")
+        saved = json.loads((sprint_dir / "deslop_report.json").read_text())
+        assert saved["total_findings"] == len(findings)
+
+
+# --- Contract Drift Detection tests ---
+
+
+class TestContractDrift:
+    def test_parse_contract_file_scope(self):
+        contract = (
+            "## Implementation Scope\n"
+            "### Files to Create\n"
+            "- `src/new.py`\n"
+            "- `src/helper.py`\n"
+            "### Files to Modify\n"
+            "- `src/existing.py`\n"
+            "### Files to Preserve\n"
+            "- `src/keep.py`\n"
+        )
+        result = eval_dispatch._parse_contract_file_scope(contract)
+        assert result == {"src/new.py", "src/helper.py", "src/existing.py"}
+
+    def test_get_git_changed_files(self, monkeypatch):
+        def mock_run(cmd, **kwargs):
+            import types
+            r = types.SimpleNamespace()
+            r.returncode = 0
+            if "HEAD" in cmd:
+                r.stdout = "src/a.py\nsrc/b.py\n"
+            elif "--cached" in cmd:
+                r.stdout = "src/c.py\n"
+            else:
+                r.stdout = "src/b.py\nsrc/d.py\n"
+            r.stderr = ""
+            return r
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = eval_dispatch._get_git_changed_files(Path("/fake"))
+        assert result == {"src/a.py", "src/b.py", "src/c.py", "src/d.py"}
+
+    def test_get_git_changed_files_no_git(self, monkeypatch):
+        def mock_run(cmd, **kwargs):
+            raise FileNotFoundError("git not found")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = eval_dispatch._get_git_changed_files(Path("/fake"))
+        assert result == set()
+
+    def test_get_git_changed_files_filters_noise(self, monkeypatch):
+        def mock_run(cmd, **kwargs):
+            import types
+            r = types.SimpleNamespace()
+            r.returncode = 0
+            r.stdout = "src/app.py\n__pycache__/foo.pyc\n.claude/harness/state.json\nreal.py\n"
+            r.stderr = ""
+            return r
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = eval_dispatch._get_git_changed_files(Path("/fake"))
+        assert "src/app.py" in result
+        assert "real.py" in result
+        assert not any("__pycache__" in f for f in result)
+        assert not any(".claude" in f for f in result)
+
+    def test_drift_detects_out_of_scope(self, monkeypatch, tmp_path):
+        contract = "### Files to Create\n- `src/a.py`\n### Files to Modify\n- `src/b.py`\n"
+        monkeypatch.setattr(eval_dispatch, "_get_git_changed_files", lambda root: {"src/a.py", "src/b.py", "src/c.py"})
+        sprint_dir = tmp_path / "sprint-001"
+        sprint_dir.mkdir()
+        drift = eval_dispatch.run_contract_drift_check(contract, sprint_dir, tmp_path)
+        assert drift["drift_detected"] is True
+        assert "src/c.py" in drift["out_of_scope_files"]
+        assert drift["source"] == "git"
+
+    def test_drift_detects_missing_impl(self, monkeypatch, tmp_path):
+        contract = "### Files to Create\n- `src/a.py`\n- `src/b.py`\n- `src/c.py`\n"
+        monkeypatch.setattr(eval_dispatch, "_get_git_changed_files", lambda root: {"src/a.py"})
+        sprint_dir = tmp_path / "sprint-001"
+        sprint_dir.mkdir()
+        drift = eval_dispatch.run_contract_drift_check(contract, sprint_dir, tmp_path)
+        assert drift["drift_detected"] is True
+        assert set(drift["missing_impl_files"]) == {"src/b.py", "src/c.py"}
+
+    def test_drift_no_drift_when_aligned(self, monkeypatch, tmp_path):
+        contract = "### Files to Create\n- `src/a.py`\n### Files to Modify\n- `src/b.py`\n"
+        monkeypatch.setattr(eval_dispatch, "_get_git_changed_files", lambda root: {"src/a.py", "src/b.py"})
+        sprint_dir = tmp_path / "sprint-001"
+        sprint_dir.mkdir()
+        drift = eval_dispatch.run_contract_drift_check(contract, sprint_dir, tmp_path)
+        assert drift["drift_detected"] is False
+
+    def test_drift_fallback_to_gen_report(self, monkeypatch, tmp_path):
+        contract = "### Files to Create\n- `src/a.py`\n"
+        monkeypatch.setattr(eval_dispatch, "_get_git_changed_files", lambda root: set())
+        sprint_dir = tmp_path / "sprint-001"
+        sprint_dir.mkdir()
+        (sprint_dir / "gen_report.md").write_text(
+            "### Files Created\n- `src/a.py`\n- `src/extra.py`\n", encoding="utf-8"
+        )
+        drift = eval_dispatch.run_contract_drift_check(contract, sprint_dir, tmp_path)
+        assert drift["source"] == "gen_report"
+        assert "src/extra.py" in drift["out_of_scope_files"]
