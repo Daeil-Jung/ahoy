@@ -869,3 +869,100 @@ def test_result_includes_model_perspectives(monkeypatch: pytest.MonkeyPatch, tmp
         "codex": "accuracy_coverage",
         "gemini": "security_edge",
     }
+
+
+# ── Backpressure Gate tests ──────────────────────────────────────
+
+
+def test_parse_eval_strategy_valid(tmp_path: Path):
+    spec = tmp_path / "spec.md"
+    spec.write_text(
+        '# Spec\n\n```yaml\ntest_command: "uv run pytest"\nlint_command: "ruff check"\n```\n',
+        encoding="utf-8",
+    )
+    result = eval_dispatch.parse_eval_strategy(spec)
+    assert result == {"test_command": "uv run pytest"}
+
+
+def test_parse_eval_strategy_missing_spec(tmp_path: Path):
+    result = eval_dispatch.parse_eval_strategy(tmp_path / "nonexistent.md")
+    assert result == {}
+
+
+def test_parse_eval_strategy_malformed(tmp_path: Path):
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n\n```yaml\nlint_command: ruff\n```\n", encoding="utf-8")
+    result = eval_dispatch.parse_eval_strategy(spec)
+    assert result == {}
+
+
+def test_backpressure_gate_test_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakeResult:
+        returncode = 0
+        stdout = "5 passed"
+        stderr = ""
+
+    monkeypatch.setattr(
+        eval_dispatch.subprocess, "run",
+        lambda *args, **kwargs: FakeResult(),
+    )
+    result_type, passed, output = eval_dispatch.run_backpressure_gate("pytest", tmp_path)
+    assert result_type == "test_result"
+    assert passed is True
+    assert "5 passed" in output
+
+
+def test_backpressure_gate_test_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakeResult:
+        returncode = 1
+        stdout = "2 failed, 3 passed"
+        stderr = "FAILURES"
+
+    monkeypatch.setattr(
+        eval_dispatch.subprocess, "run",
+        lambda *args, **kwargs: FakeResult(),
+    )
+    result_type, passed, output = eval_dispatch.run_backpressure_gate("pytest", tmp_path)
+    assert result_type == "test_result"
+    assert passed is False
+    assert "2 failed" in output
+
+
+def test_backpressure_gate_infra_cmd_not_found(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def raise_fnf(*args, **kwargs):
+        raise FileNotFoundError("No such file or directory: 'badcmd'")
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", raise_fnf)
+    result_type, passed, output = eval_dispatch.run_backpressure_gate("badcmd", tmp_path)
+    assert result_type == "infra_error"
+    assert passed is False
+    assert "command not found" in output
+
+
+def test_backpressure_gate_infra_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import subprocess as _subprocess
+
+    def raise_timeout(*args, **kwargs):
+        raise _subprocess.TimeoutExpired(cmd="pytest", timeout=120)
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", raise_timeout)
+    result_type, passed, output = eval_dispatch.run_backpressure_gate("pytest", tmp_path, timeout=120)
+    assert result_type == "infra_error"
+    assert passed is False
+    assert "timeout after 120s" in output
+
+
+def test_backpressure_gate_infra_no_stdout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+        stderr = "bash: badcmd: command not found"
+
+    monkeypatch.setattr(
+        eval_dispatch.subprocess, "run",
+        lambda *args, **kwargs: FakeResult(),
+    )
+    result_type, passed, output = eval_dispatch.run_backpressure_gate("badcmd", tmp_path)
+    assert result_type == "infra_error"
+    assert passed is False
+    assert "command not found" in output

@@ -169,13 +169,22 @@ def check_post_eval() -> None:
     if not issues_file.exists():
         fail("[HARNESS-GUARD] Blocked: Evaluation result file not found")
 
+    # Check for backpressure gate results before standard checks
+    data = load_json(issues_file)
+    if data and data.get("backpressure_gate"):
+        bp_type = data["backpressure_gate"].get("result_type")
+        if bp_type == "test_result" and data.get("status_action") == "failed":
+            info("[HARNESS-GUARD] Backpressure gate: tests failed — skipping model quorum check")
+            return
+        # infra_error has verdict=error, caught by existing verdict check below
+
     verdict = get_verdict(issues_file)
     status_action = get_status_action(issues_file)
     info(f"[HARNESS-GUARD] External evaluation verdict: {verdict} (status_action={status_action})")
 
     if verdict in ("error", "unknown"):
-        data = load_json(issues_file) or {}
-        reason = data.get("error_reason", "Unknown cause")
+        data_for_err = load_json(issues_file) or {}
+        reason = data_for_err.get("error_reason", "Unknown cause")
         fail(
             f"[HARNESS-GUARD] Blocked: External model evaluation failed: {reason}\n"
             "[HARNESS-GUARD] Cannot proceed without valid external model evaluation."

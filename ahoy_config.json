@@ -11,5 +11,9 @@
   "sensitive_data_masking": {
     "enabled": true,
     "extra_patterns": []
+  },
+  "backpressure_gate": {
+    "enabled": true,
+    "timeout": 120
   }
 }

@@ -710,3 +710,92 @@ def test_e2e_suggestion_field_survives_pipeline(
     suggestions = [issue.get("suggestion", "") for issue in payload["issues"]]
     assert any("fix line 42" in s for s in suggestions)
     assert len(suggestions) == 2  # One from each model
+
+
+# ── Backpressure Gate E2E tests ──────────────────────────────────
+
+
+def test_main_backpressure_test_fail_skips_models(
+    monkeypatch: pytest.MonkeyPatch, sprint_env: tuple[Path, Path],
+):
+    sprint_dir, project_root = sprint_env
+    harness_dir = sprint_dir.parent.parent
+
+    # Write spec.md with test_command
+    (harness_dir / "spec.md").write_text(
+        '# Spec\n\n```yaml\ntest_command: "pytest"\n```\n',
+        encoding="utf-8",
+    )
+
+    # Backpressure gate subprocess returns test failure
+    class FakeResult:
+        returncode = 1
+        stdout = "1 failed"
+        stderr = ""
+
+    call_model_called = []
+
+    def fake_call(model, prompt, timeout=600):
+        call_model_called.append(model)
+        return _make_model_response("pass")
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call)
+    monkeypatch.setattr(
+        eval_dispatch.subprocess, "run",
+        lambda *args, **kwargs: FakeResult(),
+    )
+    monkeypatch.setattr(
+        eval_dispatch, "load_config",
+        lambda: {"eval_models": ["codex", "claude"], "min_models": 2, "cost_limit": None, "backpressure_gate": {"enabled": True, "timeout": 30}},
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    exit_code = eval_dispatch.main()
+
+    assert exit_code == 1
+    assert call_model_called == [], "call_model should not be called when backpressure gate fails"
+
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert payload["verdict"] == "fail"
+    assert payload["status_action"] == "failed"
+    assert payload["backpressure_gate"]["result_type"] == "test_result"
+
+
+def test_main_backpressure_infra_error_produces_error_verdict(
+    monkeypatch: pytest.MonkeyPatch, sprint_env: tuple[Path, Path],
+):
+    sprint_dir, project_root = sprint_env
+    harness_dir = sprint_dir.parent.parent
+
+    # Write spec.md with test_command
+    (harness_dir / "spec.md").write_text(
+        '# Spec\n\n```yaml\ntest_command: "nonexistent_cmd"\n```\n',
+        encoding="utf-8",
+    )
+
+    import subprocess as _subprocess
+
+    def raise_fnf(*args, **kwargs):
+        raise FileNotFoundError("No such file: nonexistent_cmd")
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", raise_fnf)
+    monkeypatch.setattr(
+        eval_dispatch, "load_config",
+        lambda: {"eval_models": ["codex", "claude"], "min_models": 2, "cost_limit": None, "backpressure_gate": {"enabled": True, "timeout": 30}},
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys, "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    exit_code = eval_dispatch.main()
+
+    assert exit_code == 1
+
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert payload["verdict"] == "error"
+    assert payload["status_action"] == "error"
+    assert payload["backpressure_gate"]["result_type"] == "infra_error"
