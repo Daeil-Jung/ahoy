@@ -216,19 +216,22 @@ generated → passed transition requires:
   ✓ verdict ↔ status consistent?
 
   Any failure → transition blocked + automatic rollback
+
+  Exception: backpressure gate test failures
+  can transition generated → failed without model quorum
 ```
 
 ### Layer 3 — Pre/Post Hook Matrix
 
 | Timing | Matcher | Script | Blocks When |
 |--------|---------|--------|-------------|
-| Pre | `Write\|Edit(*harness_state*)` | `pre-state-write` | Transition from generated without evaluation |
-| Post | `Write\|Edit(*harness_state*)` | `post-state-write` | passed ↔ verdict mismatch → **auto rollback** |
+| Pre | `Edit\|Write` | `scope-check` | File outside contract.md Implementation Scope or in Files to Preserve |
 | Pre | `Write\|Edit(*issues.json*)` | `guard-eval-files` | Claude writing issues.json directly (always) |
 | Pre | `Bash\|Agent(*ahoy-gen*)` | `pre-gen` | Generator without contract.md |
+| Pre | `Write\|Edit(*harness_state*)` | `pre-state-write` | Transition from generated without evaluation |
 | Post | `Bash(*eval_dispatch*)` | `post-eval` | verdict error/unknown, valid models < 2 |
-| Pre | `Bash(git commit*)` | `pre-commit` | Test failure |
-| Pre | `Bash(git push*)` | `pre-push` | Test failure or state inconsistency |
+| Post | `Bash(*eval_dispatch*)` | `circuit-breaker` | Repeated failure pattern across rework attempts |
+| Post | `Write\|Edit(*harness_state*)` | `post-state-write` | passed ↔ verdict mismatch → **auto rollback** |
 
 Hook scripts use `${CLAUDE_PLUGIN_ROOT}` paths — they work regardless of where the plugin is installed.
 

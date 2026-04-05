@@ -35,10 +35,11 @@ Sprint object: `{"sprint_id", "title", "status", "attempt": 0, "max_attempts": 3
 Hooks in `hooks/hooks.json` use `${CLAUDE_PLUGIN_ROOT}` paths. Key guards:
 
 - **guard-eval-files** — unconditionally blocks Claude from writing issues.json
-- **pre-state-write** — requires issues.json + 2 valid models before leaving generated
+- **scope-check** — verifies Edit/Write targets are within contract.md's Implementation Scope; blocks out-of-scope and preserved-file edits
+- **pre-state-write** — requires issues.json + 2 valid models before leaving generated (exception: backpressure gate test failures can transition to failed without model quorum)
 - **post-state-write** — auto-rollback if `status=passed` but `status_action` is not `passed`
 - **pre-gen** — requires contract.md before `ahoy-gen` runs
-- **post-eval** — blocks verdict=error/unknown or valid models < 2
+- **post-eval** — blocks verdict=error/unknown or valid models < 2 (exception: backpressure gate test failures bypass quorum check)
 
 ## Runtime Notes
 
