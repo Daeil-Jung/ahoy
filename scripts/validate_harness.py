@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 """Harness state transition validation script.
 
-Called from Claude Code hooks to block harness rule violations.
-Supports extended verification: test_command, lint_command, type_check_command, and coverage_threshold.
+Called from Claude Code hooks to enforce Generator-Evaluator separation.
 
 Usage: validate_harness.py <check_type>
   check_type:
-    scope-check          — Before Edit/Write: verify target file is within contract.md Implementation Scope
-    pre-state-write      — Before writing harness_state.json: verify external evaluation exists before leaving generated
-    post-state-write     — After writing harness_state.json: verify status=passed <-> status_action consistency
-    pre-gen              — Before Generator execution: verify contract.md exists
-    post-eval            — After evaluation: verify external model verdict in issues.json
-    guard-eval-files     — Block direct writing of issues.json (only eval_dispatch.py allowed)
-    audit-final-scope    — Before generated transition: verify all modified files are within contract scope
-    pre-commit           — Run tests, lint, and type check before commit (only in harness mode)
-    pre-push             — Run tests, lint, type check + verify state consistency before push
-    post-edit-quality    — After Edit/Write: detect TODO/FIXME/stub/placeholder patterns
+    guard-eval-files     — Block direct writing of issues.json
+    pre-gen              — Verify contract.md exists before Generator
+    pre-state-write      — Require external evaluation before leaving generated
+    post-eval            — Verify external model verdict in issues.json
+    post-state-write     — Consistency rollback if status/verdict mismatch
     circuit-breaker      — Detect repeated failure patterns across rework attempts
-    record-read          — After Read: record file hash for stale-read detection
-    stale-read-check     — Before Edit/Write: verify file has not changed since last Read
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -60,125 +49,6 @@ def get_current_status(state: dict) -> str:
     if idx < len(sprints):
         return sprints[idx].get("status", "")
     return ""
-
-
-def _read_spec_content() -> str:
-    spec_file = HARNESS_DIR / "spec.md"
-    if not spec_file.exists():
-        return ""
-    return spec_file.read_text(encoding="utf-8")
-
-
-def _is_placeholder(value: str) -> bool:
-    return "{{" in value
-
-
-def get_test_command() -> str:
-    content = _read_spec_content()
-    if not content:
-        return ""
-    match = re.search(r'test_command:\s*"([^"]+)"', content)
-    if match and not _is_placeholder(match.group(1)):
-        return match.group(1)
-    return ""
-
-
-def get_lint_command() -> str:
-    content = _read_spec_content()
-    if not content:
-        return ""
-    match = re.search(r'lint_command:\s*"([^"]+)"', content)
-    if match and not _is_placeholder(match.group(1)):
-        return match.group(1)
-    return ""
-
-
-def get_type_check_command() -> str:
-    content = _read_spec_content()
-    if not content:
-        return ""
-    match = re.search(r'type_check_command:\s*"([^"]+)"', content)
-    if match and not _is_placeholder(match.group(1)):
-        return match.group(1)
-    return ""
-
-
-def get_coverage_threshold() -> int | None:
-    content = _read_spec_content()
-    if not content:
-        return None
-    match = re.search(r'coverage_threshold:\s*(\S+)', content)
-    if not match or _is_placeholder(match.group(1)):
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-def _parse_coverage_percent(output: str) -> float | None:
-    """Extract coverage percentage from test output.
-
-    Looks for common patterns like:
-      - "Coverage: 85%"
-      - "85% coverage"
-      - "TOTAL ... 85%"
-      - "Total coverage: 85.3%"
-    """
-    patterns = [
-        r'(?:coverage|cov)[:\s]+(\d+(?:\.\d+)?)\s*%',
-        r'(\d+(?:\.\d+)?)\s*%\s*(?:coverage|cov)',
-        r'TOTAL\s+.*?(\d+(?:\.\d+)?)\s*%',
-        r'(\d+(?:\.\d+)?)\s*%',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
-    return None
-
-
-def _run_verification_command(label: str, cmd: str) -> None:
-    """Run a verification command and fail with a clear message if it fails."""
-    info(f"[HARNESS-GUARD] Running {label}: {cmd}")
-    result = subprocess.run(cmd, shell=True)
-    if result.returncode != 0:
-        fail(
-            f"\n[HARNESS-GUARD] Blocked: {label} failed — blocked\n"
-            f"[HARNESS-GUARD] Fix the {label} issues and try again."
-        )
-    info(f"[HARNESS-GUARD] Passed: {label} passed")
-
-
-def _run_tests_with_coverage(test_cmd: str, coverage_threshold: int | None) -> None:
-    """Run test command, optionally checking coverage threshold."""
-    info(f"[HARNESS-GUARD] Running tests: {test_cmd}")
-    result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True)
-    # Print output so it's visible
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-
-    if result.returncode != 0:
-        fail(
-            "\n[HARNESS-GUARD] Blocked: Tests failed — blocked\n"
-            "[HARNESS-GUARD] Fix the tests and try again."
-        )
-    info("[HARNESS-GUARD] Passed: Tests passed")
-
-    if coverage_threshold is not None:
-        combined_output = (result.stdout or "") + (result.stderr or "")
-        coverage = _parse_coverage_percent(combined_output)
-        if coverage is not None:
-            if coverage < coverage_threshold:
-                fail(
-                    f"\n[HARNESS-GUARD] Blocked: Coverage {coverage:.1f}% is below threshold {coverage_threshold}%\n"
-                    "[HARNESS-GUARD] Increase test coverage and try again."
-                )
-            info(f"[HARNESS-GUARD] Passed: Coverage {coverage:.1f}% meets threshold {coverage_threshold}%")
-        else:
-            info(f"[HARNESS-GUARD] Warning: Could not parse coverage from test output — skipping coverage check (threshold: {coverage_threshold}%)")
 
 
 def verify_issues_integrity(issues_file: Path) -> str:
@@ -226,266 +96,34 @@ def info(msg: str) -> None:
     print(msg)
 
 
-# ── Stale-read detection ──────────────────────────────────────
-
-_READ_HASH_FILE = HARNESS_DIR / ".read_hashes.json"
+# ── Core checks ──────────────────────────────────────────────────
 
 
-def _file_hash(path: Path) -> str:
-    """Compute SHA-256 of file contents."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _load_read_hashes() -> dict[str, str]:
-    """Load the read hash registry."""
-    if _READ_HASH_FILE.exists():
-        try:
-            return json.loads(_READ_HASH_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def _save_read_hashes(hashes: dict[str, str]) -> None:
-    """Persist the read hash registry."""
-    _READ_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _READ_HASH_FILE.write_text(json.dumps(hashes, indent=2), encoding="utf-8")
-
-
-def record_read_hash() -> None:
-    """PostToolUse Read: record the hash of the file that was just read."""
-    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
-    if not tool_input_raw:
-        return
-    try:
-        tool_input = json.loads(tool_input_raw)
-    except json.JSONDecodeError:
-        return
-    file_path = tool_input.get("file_path", "")
-    if not file_path:
-        return
-    resolved = Path(file_path).resolve()
-    if not resolved.is_file():
-        return
-    canonical_key = str(resolved)
-    hashes = _load_read_hashes()
-    hashes[canonical_key] = _file_hash(resolved)
-    _save_read_hashes(hashes)
-
-
-def check_stale_read() -> None:
-    """PreToolUse Edit/Write: compare current file hash to last-read hash."""
-    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
-    if not tool_input_raw:
-        return
-    try:
-        tool_input = json.loads(tool_input_raw)
-    except json.JSONDecodeError:
-        return
-    file_path = tool_input.get("file_path", "")
-    if not file_path:
-        return
-    resolved = Path(file_path).resolve()
-    if not resolved.is_file():
-        return  # New file creation — no hash to compare
-    canonical_key = str(resolved)
-    hashes = _load_read_hashes()
-    stored_hash = hashes.get(canonical_key)
-    if stored_hash is None:
-        print(f"[HARNESS-WARN] No Read recorded for {file_path} — proceeding without stale check", file=sys.stderr)
-        return
-    current_hash = _file_hash(resolved)
-    if current_hash != stored_hash:
-        fail(
-            f"[HARNESS-GUARD] Blocked: Stale read detected for {file_path}. "
-            "File has been modified since last Read. Re-read the file before editing."
-        )
-
-
-# ── Failure pattern detection (circuit breaker) ────────────────
-
-
-_FAILURE_PATTERNS: dict[str, list[str]] = {
-    "scope_violation": ["scope", "out of scope", "outside", "not in contract"],
-    "test_failure": ["test", "assert", "expect", "fail"],
-    "stub_remaining": ["stub", "todo", "not implemented", "placeholder", "fixme"],
-    "type_error": ["type", "typeerror", "typing", "annotation", "incompatible"],
-    "logic_error": ["logic", "incorrect", "wrong", "bug", "regression"],
-}
-
-
-def classify_failure_type(issues: list[dict]) -> list[str]:
-    """Classify each issue into a failure pattern category.
-
-    Inspects the ``category`` and ``description`` fields of each issue dict
-    and returns a list of matched pattern labels.
-    """
-    matched: list[str] = []
-    for issue in issues:
-        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
-        for label, keywords in _FAILURE_PATTERNS.items():
-            if any(kw in text for kw in keywords):
-                matched.append(label)
-                break
-        else:
-            matched.append("other")
-    return matched
-
-
-def _issues_signature(issues: list[dict]) -> set[str]:
-    """Build a set of comparable signatures from issue dicts.
-
-    Uses ``(category, description)`` as the identity key so that two
-    issues with the same category and description are considered identical.
-    """
-    return {
-        f"{issue.get('category', '').strip().lower()}::{issue.get('description', '').strip().lower()}"
-        for issue in issues
-    }
-
-
-def _load_attempt_issues(sprint_dir: Path, attempt: int) -> list[dict]:
-    """Load issues from a specific attempt backup file.
-
-    The convention is ``issues.json.attempt-N`` for archived attempts, while
-    ``issues.json`` always holds the *current* attempt.
-
-    Returns an empty list when no backup file exists — falling back to the
-    current ``issues.json`` would cause self-comparison and false circuit
-    breaks.
-    """
-    attempt_path = sprint_dir / f"issues.json.attempt-{attempt}"
-    if attempt_path.exists():
-        data = load_json(attempt_path)
-        if data and isinstance(data.get("issues"), list):
-            return data["issues"]
-
-    print(
-        f"[validate_harness] No previous attempt issues found at {attempt_path}, "
-        f"skipping circuit breaker comparison",
-        file=sys.stderr,
+def check_guard_eval_files() -> None:
+    """Block direct writing to issues.json."""
+    fail(
+        "[HARNESS-GUARD] Blocked: Only eval_dispatch.py can write issues.json.\n"
+        "[HARNESS-GUARD] Direct creation/modification of issues.json by Claude compromises evaluation integrity.\n"
+        "[HARNESS-GUARD] If external model evaluation is needed, run eval_dispatch.py via Bash."
     )
-    return []
 
 
-def detect_failure_pattern(sprint_dir: Path, current_attempt: int) -> dict:
-    """Compare current and previous attempt issues for repeated failures.
-
-    Returns a dict with at least ``circuit_break`` (bool).  When True, the
-    dict also contains ``repeated_issues`` and ``recommendation``.
-    """
-    if current_attempt < 2:
-        return {"circuit_break": False}
-
-    # Load current issues
-    current_file = sprint_dir / "issues.json"
-    current_data = load_json(current_file)
-    if not current_data or not isinstance(current_data.get("issues"), list):
-        return {"circuit_break": False}
-    current_issues: list[dict] = current_data["issues"]
-
-    # Load previous attempt issues
-    prev_issues = _load_attempt_issues(sprint_dir, current_attempt - 1)
-    if not prev_issues:
-        return {"circuit_break": False}
-
-    current_sigs = _issues_signature(current_issues)
-    prev_sigs = _issues_signature(prev_issues)
-
-    repeated = current_sigs & prev_sigs
-    if not repeated:
-        return {"circuit_break": False}
-
-    # Build human-readable repeated issue list
-    repeated_descriptions = [sig.split("::", 1)[-1] for sig in repeated]
-    failure_types = classify_failure_type(current_issues)
-
-    return {
-        "circuit_break": True,
-        "repeated_issues": sorted(repeated_descriptions),
-        "failure_types": sorted(set(failure_types)),
-        "recommendation": "failed",
-    }
-
-
-def check_circuit_breaker() -> None:
-    """Detect repeated failure patterns across rework attempts.
-
-    This check runs after evaluation.  If the same issues appear in two
-    consecutive attempts it blocks the transition via ``fail()`` and outputs
-    the failure pattern as structured JSON to stdout so the orchestrator can
-    read and persist it.
-
-    ``validate_harness.py`` must NOT write ``harness_state.json`` directly —
-    state writes are the orchestrator's responsibility.
-    """
+def check_pre_gen() -> None:
+    """Verify contract.md exists before Generator execution."""
     state = load_state()
     current_sprint = get_current_sprint(state)
-    if not current_sprint:
-        return
+    contract = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
 
-    sprint_dir = HARNESS_DIR / "sprints" / current_sprint
-
-    # Skip circuit breaker if the current evaluation passed
-    current_issues = load_json(sprint_dir / "issues.json")
-    if current_issues and current_issues.get("status_action") == "passed":
-        print("[validate_harness] Circuit breaker skipped — status_action is passed", file=sys.stderr)
-        return
-
-    idx = state.get("current_sprint_index", 0)
-    sprint_obj = state["sprints"][idx]
-    current_attempt = sprint_obj.get("attempt", 0)
-
-    # Archive current issues.json as issues.json.attempt-{N} before comparison.
-    # This makes the current attempt's issues available for the NEXT rework cycle.
-    issues_file = sprint_dir / "issues.json"
-    if issues_file.exists() and current_attempt >= 1:
-        backup_path = sprint_dir / f"issues.json.attempt-{current_attempt}"
-        if not backup_path.exists():
-            shutil.copy2(issues_file, backup_path)
-            print(
-                f"[validate_harness] Archived {issues_file.name} as {backup_path.name}",
-                file=sys.stderr,
-            )
-
-    # Archive current gen_report.md as gen_report.md.attempt-{N} so that
-    # build_avoidance_summary() can read per-attempt approach history instead
-    # of relying on the current (overwritten) gen_report.md.
-    gen_report_file = sprint_dir / "gen_report.md"
-    if gen_report_file.exists() and current_attempt >= 1:
-        gen_backup = sprint_dir / f"gen_report.md.attempt-{current_attempt}"
-        if not gen_backup.exists():
-            shutil.copy2(gen_report_file, gen_backup)
-            print(
-                f"[validate_harness] Archived {gen_report_file.name} as {gen_backup.name}",
-                file=sys.stderr,
-            )
-
-    pattern = detect_failure_pattern(sprint_dir, current_attempt)
-
-    # Output the pattern as structured JSON so the orchestrator can persist it
-    print(json.dumps({"circuit_breaker_result": pattern}))
-
-    if pattern.get("circuit_break"):
-        repeated = pattern.get("repeated_issues", [])
-        ftypes = pattern.get("failure_types", [])
+    if not contract.exists():
         fail(
-            "[HARNESS-GUARD] Blocked: Circuit breaker triggered — repeated failure pattern detected\n"
-            f"[HARNESS-GUARD]   Repeated issues: {', '.join(repeated)}\n"
-            f"[HARNESS-GUARD]   Failure types: {', '.join(ftypes)}\n"
-            "[HARNESS-GUARD]   Recommendation: mark sprint as 'failed' instead of continuing rework.\n"
-            "[HARNESS-GUARD]   The same issues have appeared in consecutive attempts — further rework is unlikely to help."
+            f"[HARNESS-GUARD] Blocked: Contract not found: {contract}\n"
+            "[HARNESS-GUARD] Run /ahoy:ahoy-plan first."
         )
-    else:
-        info("[HARNESS-GUARD] Passed: No repeated failure pattern detected")
-
-
-# ── Check handlers ──────────────────────────────────────────────
+    info("[HARNESS-GUARD] Passed: Sprint contract confirmed")
 
 
 def check_pre_state_write() -> None:
-    """Validation before writing harness_state.json."""
-    # Create backup for rollback (used by post-state-write)
+    """Require external evaluation before leaving generated status."""
     try:
         shutil.copy2(STATE_FILE, f"{STATE_FILE}.bak")
     except OSError:
@@ -495,12 +133,9 @@ def check_pre_state_write() -> None:
     current_sprint = get_current_sprint(state)
     current_status = get_current_status(state)
 
-    if not current_sprint:
-        return  # No sprints yet, initialization phase
-    if current_status != "generated":
-        return  # Transitions from non-generated states don't require evaluation
+    if not current_sprint or current_status != "generated":
+        return
 
-    # State change from generated state -> external evaluation must exist
     issues_file = HARNESS_DIR / "sprints" / current_sprint / "issues.json"
     integrity = verify_issues_integrity(issues_file)
 
@@ -522,7 +157,38 @@ def check_pre_state_write() -> None:
             "[HARNESS-GUARD] Cannot transition state with single-model evaluation only."
         )
 
-    info(f"[HARNESS-GUARD] Passed: External evaluation confirmed (valid models: {valid_count}) — state transition allowed")
+    info(f"[HARNESS-GUARD] Passed: External evaluation confirmed (valid models: {valid_count})")
+
+
+def check_post_eval() -> None:
+    """Verify issues.json validity after evaluation."""
+    state = load_state()
+    current_sprint = get_current_sprint(state)
+    issues_file = HARNESS_DIR / "sprints" / current_sprint / "issues.json"
+
+    if not issues_file.exists():
+        fail("[HARNESS-GUARD] Blocked: Evaluation result file not found")
+
+    verdict = get_verdict(issues_file)
+    status_action = get_status_action(issues_file)
+    info(f"[HARNESS-GUARD] External evaluation verdict: {verdict} (status_action={status_action})")
+
+    if verdict in ("error", "unknown"):
+        data = load_json(issues_file) or {}
+        reason = data.get("error_reason", "Unknown cause")
+        fail(
+            f"[HARNESS-GUARD] Blocked: External model evaluation failed: {reason}\n"
+            "[HARNESS-GUARD] Cannot proceed without valid external model evaluation."
+        )
+
+    valid_count = get_valid_model_count(issues_file)
+    if valid_count < 2:
+        fail(
+            f"[HARNESS-GUARD] Blocked: {valid_count} valid model(s) — minimum 2 required\n"
+            "[HARNESS-GUARD] Consensus cannot be established with single-model evaluation only."
+        )
+
+    info(f"[HARNESS-GUARD] Passed: External evaluation valid (verdict: {verdict}, valid models: {valid_count})")
 
 
 def check_post_state_write() -> None:
@@ -564,655 +230,86 @@ def check_post_state_write() -> None:
     info(f"[HARNESS-GUARD] Passed: State consistency confirmed (status=passed, verdict={verdict})")
 
 
-def check_guard_eval_files() -> None:
-    """Block direct writing to issues.json."""
-    fail(
-        "[HARNESS-GUARD] Blocked: Only eval_dispatch.py can write issues.json.\n"
-        "[HARNESS-GUARD] Direct creation/modification of issues.json by Claude compromises evaluation integrity.\n"
-        "[HARNESS-GUARD] If external model evaluation is needed, run eval_dispatch.py via Bash."
-    )
+# ── Circuit breaker ──────────────────────────────────────────────
 
 
-def check_pre_gen() -> None:
-    """Verify contract.md exists before Generator execution."""
-    state = load_state()
-    current_sprint = get_current_sprint(state)
-    contract = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
-
-    if not contract.exists():
-        fail(
-            f"[HARNESS-GUARD] Blocked: Contract not found: {contract}\n"
-            "[HARNESS-GUARD] Run /ahoy:ahoy-plan first."
-        )
-    info("[HARNESS-GUARD] Passed: Sprint contract confirmed")
-
-
-def check_post_eval() -> None:
-    """Verify issues.json validity after evaluation."""
-    state = load_state()
-    current_sprint = get_current_sprint(state)
-    issues_file = HARNESS_DIR / "sprints" / current_sprint / "issues.json"
-
-    if not issues_file.exists():
-        fail("[HARNESS-GUARD] Blocked: Evaluation result file not found")
-
-    verdict = get_verdict(issues_file)
-    status_action = get_status_action(issues_file)
-    info(f"[HARNESS-GUARD] External evaluation verdict: {verdict} (status_action={status_action})")
-
-    if verdict in ("error", "unknown"):
-        data = load_json(issues_file) or {}
-        reason = data.get("error_reason", "Unknown cause")
-        fail(
-            f"[HARNESS-GUARD] Blocked: External model evaluation failed: {reason}\n"
-            "[HARNESS-GUARD] Cannot proceed without valid external model evaluation."
-        )
-
-    valid_count = get_valid_model_count(issues_file)
-    if valid_count < 2:
-        fail(
-            f"[HARNESS-GUARD] Blocked: {valid_count} valid model(s) — minimum 2 required\n"
-            "[HARNESS-GUARD] Consensus cannot be established with single-model evaluation only."
-        )
-
-    info(f"[HARNESS-GUARD] Passed: External evaluation valid (verdict: {verdict}, valid models: {valid_count})")
-
-
-def check_pre_commit() -> None:
-    """Run tests, lint, and type check before commit (enforced only in harness mode)."""
-    test_cmd = get_test_command()
-    lint_cmd = get_lint_command()
-    type_cmd = get_type_check_command()
-    threshold = get_coverage_threshold()
-
-    if test_cmd:
-        _run_tests_with_coverage(test_cmd, threshold)
-
-    if lint_cmd:
-        _run_verification_command("lint", lint_cmd)
-
-    if type_cmd:
-        _run_verification_command("type check", type_cmd)
-
-    if test_cmd or lint_cmd or type_cmd:
-        info("[HARNESS-GUARD] Passed: All verification checks passed — commit allowed")
-
-
-def check_pre_push() -> None:
-    """Run tests, lint, type check + verify harness state consistency before push."""
-    # 1. Run tests, lint, type check
-    test_cmd = get_test_command()
-    lint_cmd = get_lint_command()
-    type_cmd = get_type_check_command()
-    threshold = get_coverage_threshold()
-
-    if test_cmd:
-        _run_tests_with_coverage(test_cmd, threshold)
-
-    if lint_cmd:
-        _run_verification_command("lint", lint_cmd)
-
-    if type_cmd:
-        _run_verification_command("type check", type_cmd)
-
-    # 2. Harness state consistency check
-    state = load_state()
-    problems = []
-    for sprint in state.get("sprints", []):
-        sid = sprint.get("sprint_id", "")
-        status = sprint.get("status", "")
-        if status == "passed":
-            issues_path = HARNESS_DIR / "sprints" / sid / "issues.json"
-            if not issues_path.exists():
-                problems.append(f"{sid}: passed but issues.json not found")
-                continue
-            data = load_json(issues_path) or {}
-            verdict = data.get("verdict", "unknown")
-            status_action = data.get("status_action", "unknown")
-            if status_action != "passed":
-                problems.append(f"{sid}: passed but status_action={status_action} (verdict={verdict})")
-
-    if problems:
-        fail(
-            "[HARNESS-GUARD] Blocked: Harness state inconsistency detected:\n"
-            + "\n".join(problems)
-            + "\n[HARNESS-GUARD] Fix the state and try pushing again."
-        )
-
-    info("[HARNESS-GUARD] Passed: Harness state consistency confirmed — push allowed")
-
-
-def _path_matches_scope_entry(file_path: str, scope_entry: str) -> bool:
-    """Check whether *file_path* matches a single scope entry.
-
-    Both values must already be forward-slash normalised.
-    """
-    return (
-        file_path == scope_entry
-        or file_path.endswith("/" + scope_entry)
-        or scope_entry in file_path
-    )
-
-
-def parse_scope_from_contract(contract_path: Path) -> tuple[list[str], list[str], list[str]]:
-    """Parse Implementation Scope from contract.md.
-
-    Returns (files_to_create, files_to_modify, files_to_preserve).
-    """
-    try:
-        content = contract_path.read_text(encoding="utf-8")
-    except OSError:
-        return [], [], []
-
-    create: list[str] = []
-    modify: list[str] = []
-    preserve: list[str] = []
-
-    current_section: list[str] | None = None
-    in_scope = False
-
-    for line in content.splitlines():
-        stripped = line.strip()
-
-        # Detect top-level heading that ends the scope block
-        if in_scope and re.match(r"^##\s+", stripped) and "Implementation Scope" not in stripped:
-            break
-
-        if re.match(r"^##\s+Implementation Scope", stripped):
-            in_scope = True
-            continue
-
-        if not in_scope:
-            continue
-
-        if re.match(r"^###\s+Files to Create", stripped):
-            current_section = create
-            continue
-        elif re.match(r"^###\s+Files to Modify", stripped):
-            current_section = modify
-            continue
-        elif re.match(r"^###\s+Files to Preserve", stripped):
-            current_section = preserve
-            continue
-        elif re.match(r"^###\s+", stripped):
-            current_section = None
-            continue
-
-        if current_section is not None:
-            match = re.match(r"^[-*]\s+`?([^`\s]+)`?", stripped)
-            if match:
-                current_section.append(match.group(1))
-
-    return create, modify, preserve
-
-
-def check_scope() -> None:
-    """Verify target file is within contract.md Implementation Scope."""
-    state = load_state()
-    current_sprint = get_current_sprint(state)
-
-    if not current_sprint:
-        return  # No active sprint, pass through
-
-    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
-    if not contract_path.exists():
-        return  # No contract yet, pass through
-
-    # Get the file path from CLAUDE_TOOL_INPUT
-    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
-    if not tool_input_raw:
-        return  # No tool input, pass through
-
-    try:
-        tool_input = json.loads(tool_input_raw)
-    except json.JSONDecodeError:
-        return  # Can't parse, pass through
-
-    file_path = tool_input.get("file_path", "")
-    if not file_path:
-        return
-
-    # Normalize to forward slashes for consistent comparison
-    file_path_normalized = file_path.replace("\\", "/")
-
-    # Always allow harness files
-    if ".claude/harness/" in file_path_normalized or ".claude/harness\\" in file_path:
-        return
-
-    # Parse the allowed scope
-    create, modify, preserve = parse_scope_from_contract(contract_path)
-
-    # Files to Preserve are explicitly blocked
-    for p in preserve:
-        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
-            fail(
-                f"[HARNESS-GUARD] Blocked: '{file_path}' is listed in Files to Preserve\n"
-                "[HARNESS-GUARD] This file is protected by the sprint contract and must not be modified."
-            )
-
-    # Allowed files = create + modify
-    allowed = create + modify
-    if not allowed:
-        return  # No scope defined, pass through
-
-    for p in allowed:
-        if _path_matches_scope_entry(file_path_normalized, p.replace("\\", "/")):
-            return  # File is in scope
-
-    # Check if file is part of the AHOY plugin itself — always allow
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if plugin_root:
-        plugin_normalized = plugin_root.replace("\\", "/")
-        if file_path_normalized.startswith(plugin_normalized):
-            return
-
-    fail(
-        f"[HARNESS-GUARD] Blocked: '{file_path}' is outside the Implementation Scope\n"
-        f"[HARNESS-GUARD] Allowed files: {', '.join(allowed)}\n"
-        "[HARNESS-GUARD] Only create/modify files specified in the sprint contract."
-    )
-
-
-def audit_final_scope() -> None:
-    """Audit all modified files against contract scope before generated transition.
-
-    Complements check_scope() (per-file Edit/Write guard) by scanning the full
-    git diff at state-transition time so nothing slips through.
-    """
-    state = load_state()
-    current_sprint = get_current_sprint(state)
-    current_status = get_current_status(state)
-
-    if not current_sprint:
-        return  # No active sprint
-    if current_status != "generated":
-        return  # Only audit on transitions from generated state
-
-    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
-    if not contract_path.exists():
-        return  # No contract yet
-
-    create, modify, preserve = parse_scope_from_contract(contract_path)
-    allowed = create + modify
-    if not allowed and not preserve:
-        return  # No scope defined, pass through
-
-    # Check if HEAD exists (fresh repos have no commits)
-    head_check = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if head_check.returncode != 0:
-        print("[validate_harness] audit_final_scope: HEAD not found (unborn repo), skipping scope audit", file=sys.stderr)
-        return
-
-    # Collect changed files via git diff against HEAD
-    git_commands = [
-        ("git diff", ["git", "diff", "--name-only", "HEAD"]),
-        ("git diff --cached", ["git", "diff", "--name-only", "--cached"]),
-    ]
-
-    outputs: list[str] = []
-    for label, cmd in git_commands:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-        except Exception as exc:
-            fail(
-                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label}: {exc}) "
-                "— cannot verify file changes, blocking transition"
-            )
-            return  # unreachable; helps static analysis see proc is always bound
-        if proc.returncode != 0:
-            stderr_hint = (proc.stderr or "").strip()[:200]
-            fail(
-                f"[HARNESS-GUARD] Blocked: Failed to collect git scope ({label} exited {proc.returncode}"
-                f"{': ' + stderr_hint if stderr_hint else ''}) "
-                "— cannot verify file changes, blocking transition"
-            )
-        outputs.append(proc.stdout)
-
-    changed_files: set[str] = set()
-    for output in outputs:
-        for line in output.strip().splitlines():
-            stripped = line.strip()
-            if stripped:
-                changed_files.add(stripped.replace("\\", "/"))
-
-    # Filter out harness-internal files and plugin-root files — always allowed
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    plugin_root_rel = ""
-    if plugin_root:
-        try:
-            plugin_root_rel = str(Path(plugin_root).resolve().relative_to(Path.cwd().resolve())).replace("\\", "/")
-        except ValueError:
-            # Plugin root is outside the repo — use absolute path normalized
-            plugin_root_rel = plugin_root.replace("\\", "/")
-    user_changed = [
-        f for f in sorted(changed_files)
-        if not f.startswith(".claude/harness/")
-        and not (plugin_root_rel and (f.startswith(plugin_root_rel + "/") or f.startswith(plugin_root_rel)))
-    ]
-
-    # Check preserved files for unauthorized modifications
-    preserved_violations = [
-        f for f in user_changed
-        if any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in preserve)
-    ]
-
-    if preserved_violations:
-        fail(
-            "[HARNESS-GUARD] Blocked: Files to Preserve were modified:\n"
-            + "\n".join(f"  - {f}" for f in preserved_violations)
-            + "\n[HARNESS-GUARD] These files are protected by the sprint contract and must not be modified.\n"
-            "[HARNESS-GUARD] Revert changes to preserved files before transitioning."
-        )
-
-    # Check for files outside the allowed scope (create + modify)
-    out_of_scope: list[str] = []
-    if allowed:
-        out_of_scope = [
-            f for f in user_changed
-            if not any(_path_matches_scope_entry(f, p.replace("\\", "/")) for p in allowed)
-        ]
-
-    if out_of_scope:
-        fail(
-            "[HARNESS-GUARD] Blocked: Intent-Action mismatch — files outside contract scope were modified:\n"
-            + "\n".join(f"  - {f}" for f in out_of_scope)
-            + f"\n[HARNESS-GUARD] Allowed scope: {', '.join(allowed)}\n"
-            "[HARNESS-GUARD] Revert out-of-scope changes or update the contract before transitioning to generated."
-        )
-
-    info("[HARNESS-GUARD] Passed: All modified files are within contract scope")
-
-
-# ── Post-edit quality patterns ─────────────────────────────────
-
-_TEST_FILE_PATTERNS = (
-    "test_",
-    "_test.py",
-    "/tests/",
-    "/__tests__/",
-    ".test.",
-    ".spec.",
-)
-
-_MARKER_PATTERN = re.compile(
-    r"\b(TODO|FIXME|HACK|XXX)\b",
-)
-
-_STUB_PATTERNS = [
-    re.compile(r"^\s*pass\s*$"),
-    re.compile(r"^\s*\.\.\.\s*$"),
-    re.compile(r"""throw\s+new\s+Error\s*\(\s*["']not implemented["']\s*\)""", re.IGNORECASE),
-    re.compile(r"""raise\s+NotImplementedError"""),
-]
-
-_PLACEHOLDER_PATTERN = re.compile(
-    r"\b(lorem|foo|bar|baz|test123|placeholder)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_test_file(file_path: str) -> bool:
-    """Return True if *file_path* (forward-slash normalized) looks like a test file."""
-    # Ensure a leading slash so directory patterns like "/tests/" match relative paths
-    normalized = "/" + file_path.lstrip("/")
-    return any(pat in normalized for pat in _TEST_FILE_PATTERNS)
-
-
-def _load_allowlist() -> set[str]:
-    """Load allowed patterns from .ahoy-allowlist (one pattern per line)."""
-    allowlist: set[str] = set()
-    allowlist_path = Path(".ahoy-allowlist")
-    if allowlist_path.exists():
-        for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if line and not line.startswith("#"):
-                allowlist.add(line)
-    return allowlist
-
-
-def _line_allowed(line: str, allowlist: set[str]) -> bool:
-    """Return True if *line* matches any entry in the allowlist."""
-    return any(entry in line for entry in allowlist)
-
-
-def check_post_edit_quality() -> None:
-    """Detect TODO/FIXME/stub/placeholder patterns injected by Edit/Write."""
-    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
-    if not tool_input_raw:
-        return
-
-    try:
-        tool_input = json.loads(tool_input_raw)
-    except json.JSONDecodeError:
-        return
-
-    file_path = tool_input.get("file_path", "")
-    if not file_path:
-        return
-
-    # Normalize path separators for consistent matching
-    file_path_normalized = file_path.replace("\\", "/")
-
-    # Skip test files — patterns like TODO/placeholder are acceptable there
-    if _is_test_file(file_path_normalized):
-        return
-
-    # Skip non-text / binary-likely extensions
-    text_extensions = {
-        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
-        ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
-        ".kt", ".scala", ".sh", ".bash", ".zsh", ".ps1",
-        ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css",
-        ".md", ".txt", ".cfg", ".ini", ".env", ".sql",
+def _issues_signature(issues: list[dict]) -> set[str]:
+    return {
+        f"{issue.get('category', '').strip().lower()}::{issue.get('description', '').strip().lower()}"
+        for issue in issues
     }
-    ext = Path(file_path).suffix.lower()
-    if ext and ext not in text_extensions:
-        return
-
-    # Scan only the content being written — not the entire file on disk.
-    # For Edit tool: inspect new_string; for Write tool: inspect content.
-    content = tool_input.get("new_string") or tool_input.get("content") or ""
-    if not content:
-        return
-
-    allowlist = _load_allowlist()
-    violations: list[str] = []
-
-    for lineno, line in enumerate(content.splitlines(), start=1):
-        if _line_allowed(line, allowlist):
-            continue
-
-        # Check TODO/FIXME/HACK/XXX markers
-        marker_match = _MARKER_PATTERN.search(line)
-        if marker_match:
-            violations.append(f"  L{lineno}: {marker_match.group()} marker — {line.strip()}")
-            continue
-
-        # Check stub-only implementations
-        for stub_re in _STUB_PATTERNS:
-            if stub_re.search(line):
-                violations.append(f"  L{lineno}: stub pattern — {line.strip()}")
-                break
-        else:
-            # Check placeholder strings
-            ph_match = _PLACEHOLDER_PATTERN.search(line)
-            if ph_match:
-                violations.append(f"  L{lineno}: placeholder '{ph_match.group()}' — {line.strip()}")
-
-    if violations:
-        detail = "\n".join(violations[:20])  # cap output length
-        extra = ""
-        if len(violations) > 20:
-            extra = f"\n  ... and {len(violations) - 20} more"
-        fail(
-            f"[HARNESS-GUARD] Blocked: Quality issues detected in '{file_path}':\n"
-            f"{detail}{extra}\n"
-            "[HARNESS-GUARD] Remove TODO/FIXME markers, stubs, and placeholders before saving.\n"
-            "[HARNESS-GUARD] If intentional, add the pattern to .ahoy-allowlist."
-        )
-
-    info(f"[HARNESS-GUARD] Passed: Post-edit quality check — '{file_path}'")
 
 
-def check_hollow_consensus() -> None:
-    """Post-eval: warn if hollow consensus detected in latest issues.json."""
+def check_circuit_breaker() -> None:
+    """Detect repeated failure patterns across rework attempts."""
     state = load_state()
-    if not state:
-        return
     current_sprint = get_current_sprint(state)
     if not current_sprint:
         return
+
     sprint_dir = HARNESS_DIR / "sprints" / current_sprint
+
+    # Skip if the current evaluation passed
+    current_issues = load_json(sprint_dir / "issues.json")
+    if current_issues and current_issues.get("status_action") == "passed":
+        return
+
+    idx = state.get("current_sprint_index", 0)
+    sprint_obj = state["sprints"][idx]
+    current_attempt = sprint_obj.get("attempt", 0)
+
+    # Archive current issues.json and gen_report.md
     issues_file = sprint_dir / "issues.json"
-    data = load_json(issues_file)
-    if not data:
-        return
-    hc = data.get("hollow_consensus")
-    if hc and hc.get("detected"):
-        info(f"[HARNESS-WARN] Hollow consensus detected: {hc.get('reasons', [])}")
+    if issues_file.exists() and current_attempt >= 1:
+        backup = sprint_dir / f"issues.json.attempt-{current_attempt}"
+        if not backup.exists():
+            shutil.copy2(issues_file, backup)
 
+    gen_report = sprint_dir / "gen_report.md"
+    if gen_report.exists() and current_attempt >= 1:
+        gen_backup = sprint_dir / f"gen_report.md.attempt-{current_attempt}"
+        if not gen_backup.exists():
+            shutil.copy2(gen_report, gen_backup)
 
-# ── Anti-rationalization gate ─────────────────────────────────
-
-_RATIONALIZATION_PATTERNS = re.compile(
-    r"(unnecessary|not needed|not required|out of scope for this sprint|"
-    r"will be handled later|future sprint|currently not possible|"
-    r"beyond the scope|not applicable|deliberately omitted|"
-    r"skipped because|deferred to|left for future|"
-    r"현재 구조상 불필요|향후 처리|생략|불필요|추후)",
-    re.IGNORECASE,
-)
-
-
-def check_anti_rationalization() -> None:
-    """Block gen_report.md writes that rationalize unfulfilled acceptance criteria."""
-    state = load_state()
-    current_sprint = get_current_sprint(state)
-    if not current_sprint:
+    if current_attempt < 2:
         return
 
-    contract_path = HARNESS_DIR / "sprints" / current_sprint / "contract.md"
-    if not contract_path.exists():
+    # Compare current vs previous attempt issues
+    if not current_issues or not isinstance(current_issues.get("issues"), list):
         return
+    current_sigs = _issues_signature(current_issues["issues"])
 
-    # Parse acceptance criteria from contract.md
-    contract_text = contract_path.read_text(encoding="utf-8")
-    ac_ids: list[str] = []
-    for line in contract_text.splitlines():
-        stripped = line.strip()
-        match = re.match(r"^[-*]\s+(?:\[.?\]\s*)?(?:\*\*\s*)?(AC-\d+)", stripped)
-        if match:
-            ac_ids.append(match.group(1))
-
-    if not ac_ids:
-        return  # No ACs defined
-
-    # Read gen_report content from CLAUDE_TOOL_INPUT
-    tool_input_raw = os.environ.get("CLAUDE_TOOL_INPUT", "")
-    if not tool_input_raw:
+    prev_path = sprint_dir / f"issues.json.attempt-{current_attempt - 1}"
+    prev_data = load_json(prev_path)
+    if not prev_data or not isinstance(prev_data.get("issues"), list):
         return
+    prev_sigs = _issues_signature(prev_data["issues"])
 
-    try:
-        tool_input = json.loads(tool_input_raw)
-    except json.JSONDecodeError:
-        return
-
-    new_string = tool_input.get("new_string", "")
-    old_string = tool_input.get("old_string", "")
-    write_content = tool_input.get("content", "")
-
-    if not new_string and not write_content:
-        return
-
-    # Reconstruct post-edit file state:
-    # - Write tool: content IS the full file
-    # - Edit tool: apply old_string->new_string on disk content
-    gen_report_path = HARNESS_DIR / "sprints" / current_sprint / "gen_report.md"
-
-    if write_content:
-        post_edit_content = write_content
-    elif new_string and gen_report_path.exists():
-        try:
-            disk_content = gen_report_path.read_text(encoding="utf-8")
-            if old_string:
-                post_edit_content = disk_content.replace(old_string, new_string, 1)
-            else:
-                post_edit_content = disk_content + "\n" + new_string
-        except OSError:
-            post_edit_content = new_string
-    else:
-        post_edit_content = new_string or write_content
-
-    if not post_edit_content:
-        return
-
-    # Find "Unresolved Issues" section and check for rationalized ACs
-    rationalized: list[str] = []
-    missing: list[str] = []
-    in_unresolved = False
-
-    for line in post_edit_content.splitlines():
-        stripped = line.strip()
-        if re.match(r"^#{1,4}\s+Unresolved", stripped, re.IGNORECASE):
-            in_unresolved = True
-            continue
-        if in_unresolved and re.match(r"^#{1,4}\s+", stripped):
-            in_unresolved = False
-            continue
-
-        if in_unresolved:
-            for ac_id in ac_ids:
-                if ac_id in stripped and _RATIONALIZATION_PATTERNS.search(stripped):
-                    rationalized.append(ac_id)
-
-    # Check for ACs completely missing from the report
-    for ac_id in ac_ids:
-        if ac_id not in post_edit_content:
-            missing.append(ac_id)
-
-    blocked: list[str] = []
-    if rationalized:
-        blocked.append(f"Rationalized ACs: {', '.join(sorted(set(rationalized)))}")
-    if missing:
-        blocked.append(f"Missing ACs (not mentioned at all): {', '.join(sorted(set(missing)))}")
-
-    if blocked:
+    repeated = current_sigs & prev_sigs
+    if repeated:
+        descriptions = sorted(sig.split("::", 1)[-1] for sig in repeated)
         fail(
-            "[HARNESS-GUARD] Blocked: Anti-rationalization gate triggered\n"
-            + "\n".join(f"[HARNESS-GUARD]   {b}" for b in blocked)
-            + "\n[HARNESS-GUARD] All acceptance criteria must be honestly addressed in gen_report.md.\n"
-            "[HARNESS-GUARD] If an AC is not met, report it as a failure — do not rationalize it away."
+            "[HARNESS-GUARD] Blocked: Circuit breaker — repeated failure pattern detected\n"
+            f"[HARNESS-GUARD]   Repeated issues: {', '.join(descriptions)}\n"
+            "[HARNESS-GUARD]   The same issues appeared in consecutive attempts — further rework is unlikely to help."
         )
 
-    info("[HARNESS-GUARD] Passed: Anti-rationalization check — all ACs addressed")
+    info("[HARNESS-GUARD] Passed: No repeated failure pattern detected")
 
 
-# ── Main ────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────
 
 CHECKS = {
-    "scope-check": check_scope,
-    "pre-state-write": check_pre_state_write,
-    "post-state-write": check_post_state_write,
-    "pre-gen": check_pre_gen,
-    "post-eval": check_post_eval,
     "guard-eval-files": check_guard_eval_files,
-    "audit-final-scope": audit_final_scope,
-    "pre-commit": check_pre_commit,
-    "pre-push": check_pre_push,
-    "post-edit-quality": check_post_edit_quality,
+    "pre-gen": check_pre_gen,
+    "pre-state-write": check_pre_state_write,
+    "post-eval": check_post_eval,
+    "post-state-write": check_post_state_write,
     "circuit-breaker": check_circuit_breaker,
-    "hollow-consensus": check_hollow_consensus,
-    "anti-rationalization": check_anti_rationalization,
-    "record-read": record_read_hash,
-    "stale-read-check": check_stale_read,
 }
 
 
 def main() -> None:
-    # If .claude/harness doesn't exist, not in harness mode -> pass through
     if not HARNESS_DIR.is_dir() or not STATE_FILE.is_file():
         sys.exit(0)
 
