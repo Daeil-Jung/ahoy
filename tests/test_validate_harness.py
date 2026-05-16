@@ -802,3 +802,23 @@ def test_hooks_json_covers_all_expected_check_types():
     ]
     for check in expected_checks:
         assert check in combined, f"Missing hook check: {check}"
+
+
+def test_check_post_eval_backpressure_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    payload = issue_payload(verdict="fail", status_action="failed", models_valid=[])
+    payload["result_type"] = "test_result"
+    payload["model_verdicts"] = {}
+    write_issues(tmp_path, payload)
+
+    validate_harness.check_post_eval()
+
+    infra_payload = issue_payload(verdict="error", status_action="error", models_valid=[])
+    infra_payload["result_type"] = "infra_error"
+    infra_payload["model_verdicts"] = {}
+    infra_payload["error_reason"] = "command not found"
+    write_issues(tmp_path, infra_payload)
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_eval()
