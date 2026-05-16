@@ -956,41 +956,15 @@ def run_backpressure_gate(gate: dict, cwd: Path) -> dict:
 
     timeout = _coerce_timeout(gate.get("timeout_seconds", 600))
     try:
-        argv = shlex.split(command, posix=not _IS_WINDOWS)
-        if not argv:
-            raise ValueError("empty command")
-    except ValueError as exc:
-        return {
-            "enabled": True,
-            "result_type": "infra_error",
-            "verdict": "error",
-            "status_action": "error",
-            "exit_code": 2,
-            "stdout": "",
-            "stderr": "",
-            "error_reason": f"invalid test_command: {exc}",
-        }
-
-    try:
         proc = subprocess.Popen(
-            argv,
+            command,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            shell=True,
         )
-    except FileNotFoundError as exc:
-        return {
-            "enabled": True,
-            "result_type": "infra_error",
-            "verdict": "error",
-            "status_action": "error",
-            "exit_code": 2,
-            "stdout": "",
-            "stderr": "",
-            "error_reason": f"command not found: {argv[0]}",
-        }
     except OSError as exc:
         return {
             "enabled": True,
@@ -1028,6 +1002,20 @@ def run_backpressure_gate(gate: dict, cwd: Path) -> dict:
         }
 
     exit_code = int(proc.returncode or 0)
+    if exit_code in {126, 127}:
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "error_reason": f"failed to execute test_command via shell (exit {exit_code})",
+            "test_command": command,
+            "timeout_seconds": timeout,
+        }
+
     passed = exit_code == 0
     return {
         "enabled": True,

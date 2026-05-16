@@ -908,6 +908,21 @@ def test_run_backpressure_gate(tmp_path: Path):
     assert stderr_only["stdout"] == ""
     assert "stderr-only" in stderr_only["stderr"]
 
+    shell_semantics = eval_dispatch.run_backpressure_gate(
+        {
+            "enabled": True,
+            "test_command": (
+                "AHOY_GATE=ok python -c \"import os; print(os.environ['AHOY_GATE'])\" "
+                "> shell-out.txt && test -s shell-out.txt"
+            ),
+            "timeout_seconds": 5,
+        },
+        tmp_path,
+    )
+    assert shell_semantics["result_type"] == "test_result"
+    assert shell_semantics["verdict"] == "pass"
+    assert (tmp_path / "shell-out.txt").read_text(encoding="utf-8").strip() == "ok"
+
     missing = eval_dispatch.run_backpressure_gate(
         {"enabled": True, "test_command": "definitely-not-a-real-ahoy-command", "timeout_seconds": 5},
         tmp_path,
