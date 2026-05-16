@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -955,16 +956,19 @@ def run_backpressure_gate(gate: dict, cwd: Path) -> dict:
         }
 
     timeout = _coerce_timeout(gate.get("timeout_seconds", 600))
+    popen_kwargs = {
+        "cwd": str(cwd),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "shell": True,
+    }
+    if not _IS_WINDOWS:
+        popen_kwargs["start_new_session"] = True
+
     try:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            shell=True,
-        )
+        proc = subprocess.Popen(command, **popen_kwargs)
     except OSError as exc:
         return {
             "enabled": True,
@@ -982,11 +986,23 @@ def run_backpressure_gate(gate: dict, cwd: Path) -> dict:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.terminate()
+        if _IS_WINDOWS:
+            proc.terminate()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         try:
             stdout, stderr = proc.communicate(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            if _IS_WINDOWS:
+                proc.kill()
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             stdout, stderr = proc.communicate()
 
     if timed_out:

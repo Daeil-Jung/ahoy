@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -932,12 +933,23 @@ def test_run_backpressure_gate(tmp_path: Path):
     assert missing["status_action"] == "error"
     assert missing["exit_code"] == 2
 
+    timeout_start = time.monotonic()
     timeout = eval_dispatch.run_backpressure_gate(
-        {"enabled": True, "test_command": "python -c \"import time; time.sleep(10)\"", "timeout_seconds": 0.1},
+        {
+            "enabled": True,
+            "test_command": (
+                "python -c \"import subprocess, time; "
+                "subprocess.Popen(['python', '-c', 'import time; time.sleep(10)']); "
+                "time.sleep(10)\""
+            ),
+            "timeout_seconds": 0.1,
+        },
         tmp_path,
     )
+    elapsed = time.monotonic() - timeout_start
     assert timeout["result_type"] == "infra_error"
     assert timeout["verdict"] == "error"
     assert timeout["status_action"] == "error"
     assert timeout["exit_code"] == 2
     assert "timeout" in timeout["error_reason"].lower()
+    assert elapsed < 3
