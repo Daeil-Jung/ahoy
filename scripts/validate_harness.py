@@ -516,6 +516,11 @@ def check_post_eval() -> None:
             "[HARNESS-GUARD] Cannot proceed without valid external model evaluation."
         )
 
+    data = load_json(issues_file) or {}
+    if data.get("result_type") == "test_result" and verdict == "fail" and status_action == "failed":
+        info("[HARNESS-GUARD] Passed: Backpressure test failure recorded — model quorum exception applies")
+        return
+
     valid_count = get_valid_model_count(issues_file)
     if valid_count < 2:
         fail(
