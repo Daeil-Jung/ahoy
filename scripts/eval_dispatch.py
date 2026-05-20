@@ -819,6 +819,29 @@ def _parse_scalar(value: str) -> object:
     return value
 
 
+def _strip_inline_comment(value: str) -> str:
+    """Strip YAML inline comment suffix introduced by `#` when separated by whitespace."""
+    value = value.strip()
+    match = re.search(r"\s+#", value)
+    if match:
+        return value[: match.start()].rstrip()
+    return value
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    value = _strip_inline_comment(str(value)).strip()
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return bool(value)
+
+
 def _parse_simple_yaml_mapping(text: str) -> dict:
     """Parse the small YAML subset used by .claude/harness/spec.md frontmatter.
 
@@ -901,7 +924,7 @@ def parse_eval_strategy(spec_path: Path, config: dict | None = None) -> dict:
     if isinstance(spec_gate, dict):
         merged = dict(gate)
         if "enabled" in spec_gate:
-            merged["enabled"] = bool(spec_gate["enabled"])
+            merged["enabled"] = _coerce_bool(spec_gate["enabled"])
         if "test_command" in spec_gate:
             merged["test_command"] = str(spec_gate["test_command"] or "")
         if "timeout_seconds" in spec_gate:

@@ -867,6 +867,28 @@ def test_parse_eval_strategy(tmp_path: Path):
     assert parsed["backpressure_gate"]["test_command"] == "python -c 'raise SystemExit(1)'"
     assert parsed["backpressure_gate"]["timeout_seconds"] == 3
 
+    spec.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: false # keep disabled due temp regression\n"
+        "  test_command: \"echo should_not_run\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    parsed = eval_dispatch.parse_eval_strategy(spec, {})
+    assert parsed["backpressure_gate"]["enabled"] is False
+
+    spec.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: true # gate can run in CI\n"
+        "  test_command: \"echo gate\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    parsed = eval_dispatch.parse_eval_strategy(spec, {})
+    assert parsed["backpressure_gate"]["enabled"] is True
+
     malformed = tmp_path / "malformed.md"
     malformed.write_text("---\nbackpressure_gate:\n  enabled: [unterminated\n---\n", encoding="utf-8")
     malformed_strategy = eval_dispatch.parse_eval_strategy(malformed, {})
