@@ -896,6 +896,33 @@ def test_parse_eval_strategy(tmp_path: Path):
     assert malformed_strategy["backpressure_gate"]["result_type"] == "infra_error"
     assert "malformed" in malformed_strategy["backpressure_gate"]["error_reason"].lower()
 
+    quoted_scalar = tmp_path / "quoted.md"
+    quoted_scalar.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: true\n"
+        "  test_command: python -m pytest\n"
+        "  timeout_seconds: 0.1 # quick gate\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    quoted_strategy = eval_dispatch.parse_eval_strategy(quoted_scalar, {})
+    assert quoted_strategy["backpressure_gate"]["timeout_seconds"] == "0.1 # quick gate"
+    assert eval_dispatch._coerce_timeout(quoted_strategy["backpressure_gate"]["timeout_seconds"]) == 0.1
+
+    quote_error = tmp_path / "quote-error.md"
+    quote_error.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: 'true\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    quote_error_strategy = eval_dispatch.parse_eval_strategy(quote_error, {})
+    assert quote_error_strategy["backpressure_gate"]["enabled"] is True
+    assert quote_error_strategy["backpressure_gate"]["result_type"] == "infra_error"
+    assert "unterminated" in quote_error_strategy["backpressure_gate"]["error_reason"].lower()
+
 
 def test_run_backpressure_gate(tmp_path: Path):
     sentinel = tmp_path / "sentinel.txt"

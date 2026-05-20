@@ -803,7 +803,14 @@ def _parse_scalar(value: str) -> object:
         return False
     if value in {"null", "None", "~"}:
         return None
-    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+    if value[0] in {"'", '"'}:
+        quote = value[0]
+        if not value.endswith(quote):
+            raise ValueError("malformed YAML scalar: unterminated quoted value")
+        if len(value) == 1:
+            raise ValueError("malformed YAML scalar: empty quoted value")
+        if value[-1] != quote:
+            raise ValueError("malformed YAML scalar: mismatched quote")
         return value[1:-1]
     try:
         if re.fullmatch(r"-?\d+", value):
@@ -936,8 +943,10 @@ def parse_eval_strategy(spec_path: Path, config: dict | None = None) -> dict:
 
 
 def _coerce_timeout(value: object) -> float:
+    sanitized = _strip_inline_comment(str(value)) if value is not None else ""
+    sanitized = sanitized.strip()
     try:
-        timeout = float(value)
+        timeout = float(sanitized)
     except (TypeError, ValueError):
         return 600.0
     return max(timeout, 0.001)
