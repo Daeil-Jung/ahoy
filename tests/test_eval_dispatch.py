@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -841,3 +842,163 @@ def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.Monkey
     # Round 2 quorum lost -> falls back to round 1, which had a fail -> final fail
     assert payload["verdict"] == "fail"
     assert exit_code == 1
+
+
+def test_parse_eval_strategy(tmp_path: Path):
+    config = {"backpressure_gate": {"enabled": True, "test_command": "python -m pytest", "timeout_seconds": 7}}
+    missing_spec = tmp_path / "missing.md"
+
+    default_strategy = eval_dispatch.parse_eval_strategy(missing_spec, config)
+    assert default_strategy["backpressure_gate"] == {"enabled": True, "test_command": "python -m pytest", "timeout_seconds": 7}
+
+    spec = tmp_path / "spec.md"
+    spec.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: true\n"
+        "  test_command: \"python -c 'raise SystemExit(1)'\"\n"
+        "  timeout_seconds: 3\n"
+        "---\n"
+        "# Sprint\n",
+        encoding="utf-8",
+    )
+    parsed = eval_dispatch.parse_eval_strategy(spec, {"backpressure_gate": {"enabled": False}})
+    assert parsed["backpressure_gate"]["enabled"] is True
+    assert parsed["backpressure_gate"]["test_command"] == "python -c 'raise SystemExit(1)'"
+    assert parsed["backpressure_gate"]["timeout_seconds"] == 3
+
+    spec.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: false # keep disabled due temp regression\n"
+        "  test_command: \"echo should_not_run\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    parsed = eval_dispatch.parse_eval_strategy(spec, {})
+    assert parsed["backpressure_gate"]["enabled"] is False
+
+    spec.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: true # gate can run in CI\n"
+        "  test_command: \"echo gate\"\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    parsed = eval_dispatch.parse_eval_strategy(spec, {})
+    assert parsed["backpressure_gate"]["enabled"] is True
+
+    malformed = tmp_path / "malformed.md"
+    malformed.write_text("---\nbackpressure_gate:\n  enabled: [unterminated\n---\n", encoding="utf-8")
+    malformed_strategy = eval_dispatch.parse_eval_strategy(malformed, {})
+    assert malformed_strategy["backpressure_gate"]["enabled"] is True
+    assert malformed_strategy["backpressure_gate"]["result_type"] == "infra_error"
+    assert "malformed" in malformed_strategy["backpressure_gate"]["error_reason"].lower()
+
+    quoted_scalar = tmp_path / "quoted.md"
+    quoted_scalar.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: true\n"
+        "  test_command: python -m pytest\n"
+        "  timeout_seconds: 0.1 # quick gate\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    quoted_strategy = eval_dispatch.parse_eval_strategy(quoted_scalar, {})
+    assert quoted_strategy["backpressure_gate"]["timeout_seconds"] == "0.1 # quick gate"
+    assert eval_dispatch._coerce_timeout(quoted_strategy["backpressure_gate"]["timeout_seconds"]) == 0.1
+
+    quote_error = tmp_path / "quote-error.md"
+    quote_error.write_text(
+        "---\n"
+        "backpressure_gate:\n"
+        "  enabled: 'true\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    quote_error_strategy = eval_dispatch.parse_eval_strategy(quote_error, {})
+    assert quote_error_strategy["backpressure_gate"]["enabled"] is True
+    assert quote_error_strategy["backpressure_gate"]["result_type"] == "infra_error"
+    assert "unterminated" in quote_error_strategy["backpressure_gate"]["error_reason"].lower()
+
+
+def test_run_backpressure_gate(tmp_path: Path):
+    sentinel = tmp_path / "sentinel.txt"
+    sentinel.write_text("ok", encoding="utf-8")
+
+    passed = eval_dispatch.run_backpressure_gate(
+        {"enabled": True, "test_command": "python -c \"from pathlib import Path; assert Path('sentinel.txt').exists(); print('pass-out')\"", "timeout_seconds": 5},
+        tmp_path,
+    )
+    assert passed["result_type"] == "test_result"
+    assert passed["verdict"] == "pass"
+    assert passed["status_action"] == "passed"
+    assert passed["exit_code"] == 0
+    assert "pass-out" in passed["stdout"]
+    assert passed["stderr"] == ""
+
+    failed = eval_dispatch.run_backpressure_gate(
+        {"enabled": True, "test_command": "python -c \"import sys; print('fail-out'); sys.exit(1)\"", "timeout_seconds": 5},
+        tmp_path,
+    )
+    assert failed["result_type"] == "test_result"
+    assert failed["verdict"] == "fail"
+    assert failed["status_action"] == "failed"
+    assert failed["exit_code"] == 1
+    assert "fail-out" in failed["stdout"]
+
+    stderr_only = eval_dispatch.run_backpressure_gate(
+        {"enabled": True, "test_command": "python -c \"import sys; print('stderr-only', file=sys.stderr)\"", "timeout_seconds": 5},
+        tmp_path,
+    )
+    assert stderr_only["result_type"] == "test_result"
+    assert stderr_only["verdict"] == "pass"
+    assert stderr_only["stdout"] == ""
+    assert "stderr-only" in stderr_only["stderr"]
+
+    shell_semantics = eval_dispatch.run_backpressure_gate(
+        {
+            "enabled": True,
+            "test_command": (
+                "AHOY_GATE=ok python -c \"import os; print(os.environ['AHOY_GATE'])\" "
+                "> shell-out.txt && test -s shell-out.txt"
+            ),
+            "timeout_seconds": 5,
+        },
+        tmp_path,
+    )
+    assert shell_semantics["result_type"] == "test_result"
+    assert shell_semantics["verdict"] == "pass"
+    assert (tmp_path / "shell-out.txt").read_text(encoding="utf-8").strip() == "ok"
+
+    missing = eval_dispatch.run_backpressure_gate(
+        {"enabled": True, "test_command": "definitely-not-a-real-ahoy-command", "timeout_seconds": 5},
+        tmp_path,
+    )
+    assert missing["result_type"] == "infra_error"
+    assert missing["verdict"] == "error"
+    assert missing["status_action"] == "error"
+    assert missing["exit_code"] == 2
+
+    timeout_start = time.monotonic()
+    timeout = eval_dispatch.run_backpressure_gate(
+        {
+            "enabled": True,
+            "test_command": (
+                "python -c \"import subprocess, time; "
+                "subprocess.Popen(['python', '-c', 'import time; time.sleep(10)']); "
+                "time.sleep(10)\""
+            ),
+            "timeout_seconds": 0.1,
+        },
+        tmp_path,
+    )
+    elapsed = time.monotonic() - timeout_start
+    assert timeout["result_type"] == "infra_error"
+    assert timeout["verdict"] == "error"
+    assert timeout["status_action"] == "error"
+    assert timeout["exit_code"] == 2
+    assert "timeout" in timeout["error_reason"].lower()
+    assert elapsed < 3

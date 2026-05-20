@@ -46,7 +46,7 @@ def issue_payload(
     return {
         "evaluated_at": "2026-03-29T00:00:00+00:00",
         "models_used": ["codex", "claude"],
-        "models_valid": models_valid or ["codex", "claude"],
+        "models_valid": ["codex", "claude"] if models_valid is None else models_valid,
         "verdict": verdict,
         "model_verdicts": {"codex": verdict, "claude": verdict},
         "status_action": status_action,
@@ -263,6 +263,25 @@ def test_check_pre_state_write_passes_with_two_valid_models(monkeypatch: pytest.
     validate_harness.check_pre_state_write()
 
     assert (tmp_path / ".claude" / "harness" / "harness_state.json.bak").exists()
+
+
+def test_check_pre_state_write_allows_backpressure_test_failure_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    payload = issue_payload(verdict="fail", status_action="failed", models_valid=[])
+    payload["result_type"] = "test_result"
+    payload["model_verdicts"] = {}
+    write_issues(tmp_path, payload)
+
+    validate_harness.check_pre_state_write()
+
+    infra_payload = issue_payload(verdict="error", status_action="error", models_valid=[])
+    infra_payload["result_type"] = "infra_error"
+    infra_payload["model_verdicts"] = {}
+    write_issues(tmp_path, infra_payload)
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_pre_state_write()
 
 
 def test_check_post_state_write_rolls_back_invalid_passed_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -802,3 +821,23 @@ def test_hooks_json_covers_all_expected_check_types():
     ]
     for check in expected_checks:
         assert check in combined, f"Missing hook check: {check}"
+
+
+def test_check_post_eval_backpressure_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    write_harness_state(tmp_path, status="generated")
+    payload = issue_payload(verdict="fail", status_action="failed", models_valid=[])
+    payload["result_type"] = "test_result"
+    payload["model_verdicts"] = {}
+    write_issues(tmp_path, payload)
+
+    validate_harness.check_post_eval()
+
+    infra_payload = issue_payload(verdict="error", status_action="error", models_valid=[])
+    infra_payload["result_type"] = "infra_error"
+    infra_payload["model_verdicts"] = {}
+    infra_payload["error_reason"] = "command not found"
+    write_issues(tmp_path, infra_payload)
+
+    with pytest.raises(SystemExit):
+        validate_harness.check_post_eval()

@@ -391,6 +391,16 @@ def check_circuit_breaker() -> None:
 # ── Check handlers ──────────────────────────────────────────────
 
 
+def _is_backpressure_test_failure(issues_file: Path) -> bool:
+    """Return True only for the narrow pre-eval test-failure quorum exception."""
+    data = load_json(issues_file) or {}
+    return (
+        data.get("result_type") == "test_result"
+        and data.get("verdict") == "fail"
+        and data.get("status_action") == "failed"
+    )
+
+
 def check_pre_state_write() -> None:
     """Validation before writing harness_state.json."""
     # Create backup for rollback (used by post-state-write)
@@ -425,6 +435,9 @@ def check_pre_state_write() -> None:
 
     valid_count = get_valid_model_count(issues_file)
     if valid_count < 2:
+        if _is_backpressure_test_failure(issues_file):
+            info("[HARNESS-GUARD] Passed: Backpressure test failure recorded — state transition allowed")
+            return
         fail(
             f"[HARNESS-GUARD] Blocked: {valid_count} valid external model(s) — minimum 2 required\n"
             "[HARNESS-GUARD] Cannot transition state with single-model evaluation only."
@@ -515,6 +528,10 @@ def check_post_eval() -> None:
             f"[HARNESS-GUARD] Blocked: External model evaluation failed: {reason}\n"
             "[HARNESS-GUARD] Cannot proceed without valid external model evaluation."
         )
+
+    if _is_backpressure_test_failure(issues_file):
+        info("[HARNESS-GUARD] Passed: Backpressure test failure recorded — model quorum exception applies")
+        return
 
     valid_count = get_valid_model_count(issues_file)
     if valid_count < 2:

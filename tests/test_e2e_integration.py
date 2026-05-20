@@ -281,3 +281,102 @@ def test_e2e_suggestion_field_survives_pipeline(
     suggestions = [issue.get("suggestion", "") for issue in payload["issues"]]
     assert any("fix line 42" in s for s in suggestions)
     assert len(suggestions) == 2  # One from each model
+
+
+def test_backpressure_skips_model_call(monkeypatch: pytest.MonkeyPatch, sprint_env: tuple[Path, Path]):
+    sprint_dir, project_root = sprint_env
+    calls: list[str] = []
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+        calls.append(model)
+        return _make_model_response("pass")
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call_model)
+    monkeypatch.setattr(
+        eval_dispatch,
+        "load_config",
+        lambda: {
+            "eval_models": ["codex", "claude"],
+            "min_models": 2,
+            "cost_limit": None,
+            "backpressure_gate": {
+                "enabled": True,
+                "test_command": "python -c \"import sys; sys.exit(1)\"",
+                "timeout_seconds": 5,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    exit_code = eval_dispatch.main()
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert calls == []
+    assert payload["result_type"] == "test_result"
+    assert payload["verdict"] == "fail"
+    assert payload["status_action"] == "failed"
+    assert payload["models_valid"] == []
+    assert payload["models_used"] == ["codex", "claude"]
+
+
+def test_backpressure_infra_error_skips_model_call_and_exits_2(monkeypatch: pytest.MonkeyPatch, sprint_env: tuple[Path, Path]):
+    sprint_dir, project_root = sprint_env
+    calls: list[str] = []
+
+    monkeypatch.setattr(eval_dispatch, "call_model", lambda *args, **kwargs: calls.append("called") or _make_model_response("pass"))
+    monkeypatch.setattr(
+        eval_dispatch,
+        "load_config",
+        lambda: {
+            "eval_models": ["codex", "claude"],
+            "min_models": 2,
+            "cost_limit": None,
+            "backpressure_gate": {"enabled": True, "test_command": "definitely-not-a-real-ahoy-command", "timeout_seconds": 5},
+        },
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    exit_code = eval_dispatch.main()
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert calls == []
+    assert payload["result_type"] == "infra_error"
+    assert payload["verdict"] == "error"
+    assert payload["status_action"] == "error"
+    assert payload["models_valid"] == []
+
+
+def test_backpressure_disabled_preserves_model_quorum(monkeypatch: pytest.MonkeyPatch, sprint_env: tuple[Path, Path]):
+    sprint_dir, project_root = sprint_env
+    calls: list[str] = []
+
+    def fake_call(model: str, prompt: str, timeout: int = 600) -> str:
+        calls.append(model)
+        return _make_model_response("pass")
+
+    monkeypatch.setattr(eval_dispatch, "call_model", fake_call)
+    monkeypatch.setattr(
+        eval_dispatch,
+        "load_config",
+        lambda: {"eval_models": ["codex", "claude"], "min_models": 2, "cost_limit": None, "backpressure_gate": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    assert eval_dispatch.main() == 0
+    assert sorted(calls) == ["claude", "codex"]
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert sorted(payload["models_valid"]) == ["claude", "codex"]

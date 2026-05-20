@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -790,6 +791,321 @@ def load_config() -> dict:
     return config
 
 
+
+
+def _parse_scalar(value: str) -> object:
+    value = value.strip()
+    if not value:
+        return ""
+    if value in {"true", "True"}:
+        return True
+    if value in {"false", "False"}:
+        return False
+    if value in {"null", "None", "~"}:
+        return None
+    if value[0] in {"'", '"'}:
+        quote = value[0]
+        if not value.endswith(quote):
+            raise ValueError("malformed YAML scalar: unterminated quoted value")
+        if len(value) == 1:
+            raise ValueError("malformed YAML scalar: empty quoted value")
+        if value[-1] != quote:
+            raise ValueError("malformed YAML scalar: mismatched quote")
+        return value[1:-1]
+    try:
+        if re.fullmatch(r"-?\d+", value):
+            return int(value)
+        if re.fullmatch(r"-?\d+\.\d+", value):
+            return float(value)
+    except ValueError:
+        pass
+    if value.startswith("[") and not value.endswith("]"):
+        raise ValueError("malformed YAML scalar")
+    if value.startswith("{") and not value.endswith("}"):
+        raise ValueError("malformed YAML scalar")
+    return value
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Strip YAML inline comment suffix introduced by `#` when separated by whitespace."""
+    value = value.strip()
+    match = re.search(r"\s+#", value)
+    if match:
+        return value[: match.start()].rstrip()
+    return value
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    value = _strip_inline_comment(str(value)).strip()
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return bool(value)
+
+
+def _parse_simple_yaml_mapping(text: str) -> dict:
+    """Parse the small YAML subset used by .claude/harness/spec.md frontmatter.
+
+    Supports top-level keys and one-level nested maps. This intentionally avoids
+    adding a PyYAML dependency to the plugin runtime.
+    """
+    data: dict = {}
+    current_parent: str | None = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        line = raw.strip()
+        if ":" not in line:
+            raise ValueError(f"malformed YAML line: {line}")
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("malformed YAML: empty key")
+        if indent == 0:
+            if value.strip() == "":
+                data[key] = {}
+                current_parent = key
+            else:
+                data[key] = _parse_scalar(value)
+                current_parent = None
+        else:
+            if current_parent is None or not isinstance(data.get(current_parent), dict):
+                raise ValueError(f"malformed YAML nesting near: {line}")
+            data[current_parent][key] = _parse_scalar(value)
+    return data
+
+
+def _extract_yaml_frontmatter(spec_content: str) -> dict:
+    lines = spec_content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            return _parse_simple_yaml_mapping("\n".join(lines[1:idx]))
+    raise ValueError("malformed YAML frontmatter: missing closing ---")
+
+
+def _default_backpressure_gate(config: dict) -> dict:
+    configured = config.get("backpressure_gate", {}) if isinstance(config.get("backpressure_gate", {}), dict) else {}
+    return {
+        "enabled": bool(configured.get("enabled", False)),
+        "test_command": str(configured.get("test_command", "") or ""),
+        "timeout_seconds": configured.get("timeout_seconds", configured.get("timeout", 600)),
+    }
+
+
+def parse_eval_strategy(spec_path: Path, config: dict | None = None) -> dict:
+    """Parse evaluation strategy from spec.md YAML frontmatter plus config defaults.
+
+    Source of truth: spec.md frontmatter overrides ahoy_config.json. Missing spec
+    falls back to config/defaults. Malformed spec is fail-closed and returns an
+    enabled infra_error gate descriptor so callers can block before model calls.
+    """
+    config = config or {}
+    gate = _default_backpressure_gate(config)
+    strategy = {"backpressure_gate": gate}
+
+    if not spec_path.exists():
+        return strategy
+
+    try:
+        parsed = _extract_yaml_frontmatter(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        strategy["backpressure_gate"] = {
+            "enabled": True,
+            "test_command": "",
+            "timeout_seconds": gate.get("timeout_seconds", 600),
+            "result_type": "infra_error",
+            "error_reason": f"Malformed spec.md YAML: {exc}",
+        }
+        return strategy
+
+    spec_gate = parsed.get("backpressure_gate", {})
+    if isinstance(spec_gate, dict):
+        merged = dict(gate)
+        if "enabled" in spec_gate:
+            merged["enabled"] = _coerce_bool(spec_gate["enabled"])
+        if "test_command" in spec_gate:
+            merged["test_command"] = str(spec_gate["test_command"] or "")
+        if "timeout_seconds" in spec_gate:
+            merged["timeout_seconds"] = spec_gate["timeout_seconds"]
+        elif "timeout" in spec_gate:
+            merged["timeout_seconds"] = spec_gate["timeout"]
+        strategy["backpressure_gate"] = merged
+    return strategy
+
+
+def _coerce_timeout(value: object) -> float:
+    sanitized = _strip_inline_comment(str(value)) if value is not None else ""
+    sanitized = sanitized.strip()
+    try:
+        timeout = float(sanitized)
+    except (TypeError, ValueError):
+        return 600.0
+    return max(timeout, 0.001)
+
+
+def run_backpressure_gate(gate: dict, cwd: Path) -> dict:
+    """Run the pre-eval backpressure command before any model subprocess.
+
+    Returns an issues.json-compatible gate result fragment. Test failures are
+    normal evaluation failures (quorum-exempt); infrastructure failures are
+    fail-closed errors and must remain blocking.
+    """
+    if not gate.get("enabled", False):
+        return {"enabled": False, "result_type": "disabled", "status_action": "passed", "verdict": "pass"}
+
+    if gate.get("result_type") == "infra_error":
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "",
+            "error_reason": gate.get("error_reason", "backpressure gate configuration error"),
+        }
+
+    command = str(gate.get("test_command", "") or "").strip()
+    if not command:
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "",
+            "error_reason": "backpressure gate enabled but test_command is missing",
+        }
+
+    timeout = _coerce_timeout(gate.get("timeout_seconds", 600))
+    popen_kwargs = {
+        "cwd": str(cwd),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "shell": True,
+    }
+    if not _IS_WINDOWS:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        proc = subprocess.Popen(command, **popen_kwargs)
+    except OSError as exc:
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": "",
+            "stderr": "",
+            "error_reason": f"failed to start command: {exc}",
+        }
+
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if _IS_WINDOWS:
+            proc.terminate()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            stdout, stderr = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            if _IS_WINDOWS:
+                proc.kill()
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            stdout, stderr = proc.communicate()
+
+    if timed_out:
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "error_reason": f"backpressure test_command timeout after {timeout:g}s",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code in {126, 127}:
+        return {
+            "enabled": True,
+            "result_type": "infra_error",
+            "verdict": "error",
+            "status_action": "error",
+            "exit_code": 2,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "error_reason": f"failed to execute test_command via shell (exit {exit_code})",
+            "test_command": command,
+            "timeout_seconds": timeout,
+        }
+
+    passed = exit_code == 0
+    return {
+        "enabled": True,
+        "result_type": "test_result",
+        "verdict": "pass" if passed else "fail",
+        "status_action": "passed" if passed else "failed",
+        "exit_code": exit_code,
+        "stdout": stdout or "",
+        "stderr": stderr or "",
+        "test_command": command,
+        "timeout_seconds": timeout,
+    }
+
+
+def _backpressure_result(sprint_dir: Path, models: list[str], gate_result: dict) -> dict:
+    result = {
+        "sprint": sprint_dir.name,
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "models_used": models,
+        "models_valid": [],
+        "verdict": gate_result["verdict"],
+        "model_verdicts": {},
+        "issues": [],
+        "passed_criteria": [],
+        "failed_criteria": [],
+        "status_action": gate_result["status_action"],
+        "result_type": gate_result["result_type"],
+        "backpressure_gate": gate_result,
+    }
+    if gate_result.get("result_type") == "test_result" and gate_result.get("verdict") == "fail":
+        result["issues"].append({
+            "id": "BACKPRESSURE-TEST-FAIL",
+            "severity": "major",
+            "category": "test",
+            "description": "Backpressure gate test_command failed before model evaluation",
+            "suggested_fix": "Fix failing tests before running external model evaluation",
+        })
+    if gate_result.get("error_reason"):
+        result["error_reason"] = gate_result["error_reason"]
+    return result
+
+
 def parse_usage(response: str, parsed: dict | None = None) -> dict:
     """Extract usage/token information from a model response.
 
@@ -952,6 +1268,16 @@ def main() -> int:
 
     # Resolve harness_state.json path for cost tracking
     harness_state_path = project_root / ".claude" / "harness" / "harness_state.json"
+
+    # Pre-eval backpressure gate: fail/infra-error must short-circuit before any model subprocess.
+    spec_path = project_root / ".claude" / "harness" / "spec.md"
+    strategy = parse_eval_strategy(spec_path, config)
+    gate_result = run_backpressure_gate(strategy.get("backpressure_gate", {}), project_root)
+    if gate_result.get("enabled") and gate_result.get("status_action") != "passed":
+        result = _backpressure_result(sprint_dir, models, gate_result)
+        write_result(sprint_dir, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if gate_result.get("result_type") == "infra_error" else 1
 
     # Check cost limit before proceeding (include pending calls for this run)
     if check_cost_limit(harness_state_path, config, pending_calls=len(models)):
