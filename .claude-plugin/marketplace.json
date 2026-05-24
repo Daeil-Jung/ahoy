@@ -1,6 +1,6 @@
 {
   "name": "ahoy-marketplace",
-  "description": "Marketplace for AHOY — Agent Harness for Orchestrated Yielding",
+  "description": "Marketplace for AHOY — an external review gate for AI-generated code",
   "owner": {
     "name": "Daeil-Jung",
     "url": "https://github.com/Daeil-Jung"
@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "ahoy",
-      "description": "Generator-Evaluator separation with external model consensus for AI coding agents",
+      "description": "External model review gate for AI-generated code with Generator-Evaluator separation",
       "source": "./"
     }
   ]

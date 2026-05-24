@@ -4,15 +4,15 @@
 
 # AHOY
 
-### Agent Harness for Orchestrated Yielding
+### AI 생성 코드 전용 외부 리뷰 게이트
 
 **AI 코딩 에이전트가 생성한 코드를, AI 코딩 에이전트가 아닌 외부 모델이 평가한다.**
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](#requirements)
-[![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-blueviolet?logo=anthropic&logoColor=white)](#installation)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](#선행-조건)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-blueviolet?logo=anthropic&logoColor=white)](#5분-첫-실행)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#license)
 
-[설치](#설치) · [아키텍처](#아키텍처) · [동작 방식](#동작-방식) · [스킬](#스킬) · [안전 장치](#안전-장치) · [로드맵](#로드맵)
+[설치](#설치) · [5분 첫 실행](#5분-첫-실행) · [사용법](#사용법) · [아키텍처](#아키텍처) · [동작 방식](#동작-방식) · [스킬](#스킬) · [안전 장치](#안전-장치) · [로드맵](#로드맵)
 
 **[English](../README.md)** | **[한국어](README.ko.md)**
 
@@ -20,49 +20,51 @@
 
 ---
 
-## 문제
+## 포지셔닝
 
-AI 코딩 에이전트는 자기가 쓴 코드를 자기가 평가한다. 같은 모델, 같은 컨텍스트, 같은 편향.
+**한 문장:** AHOY는 AI 코딩 에이전트가 만든 코드를 **외부 모델이 검토**해서 승인하는 **외부 리뷰 게이트**입니다.
 
-<p align="center">
-  <img src="assets/problem-solution.svg" alt="문제 vs 해결" width="720"/>
-</p>
+AI 코딩 에이전트는 자신이 쓴 코드에 스스로 합격 판정을 내리기 쉽습니다. AHOY는 외부 모델 검토를 거쳐서만 진행 상태를 바꿉니다.
 
-## 해결
+### 언제 쓰고 / 안 쓰나
 
-AHOY는 **Generator와 Evaluator를 물리적으로 분리**한다.
-
-- Generator(Claude)가 코드를 쓰면, **별도 프로세스**의 외부 모델(Codex, Gemini, Claude CLI)이 평가한다.
-- Claude는 외부 모델의 판정을 **읽기만** 할 수 있고, **변경할 수 없다**.
-- Hook 시스템이 규칙 위반을 **shell 레벨에서 차단**한다 — 프롬프트 우회 불가.
+- **쓰는 경우:** 코드 산출을 외부 판정으로 걸러야 할 때.
+- **안 쓰는 경우:** 외부 모델 CLI 설치가 없고, 외부 리뷰가 꼭 필요 없는 빠른 임시 실험일 때.
 
 ---
 
 ## 설치
 
-AHOY는 **Claude Code 플러그인**입니다. 2단계로 설치합니다:
-
 ```bash
-# 1. 마켓플레이스 추가 & 설치
 /plugin marketplace add Daeil-Jung/ahoy
 /plugin install ahoy
-
-# 2. 환경 점검
-/ahoy:ahoy-setup
 ```
 
-> `/ahoy:ahoy-setup`은 Python, uv, 외부 모델 CLI를 점검하고 누락된 항목의 설치 방법을 안내합니다.
+## 5분 첫 실행
 
-### 요구사항
+```bash
+# 1) 환경 점검 (누락 항목은 /ahoy:ahoy-setup에서 안내)
+/ahoy:ahoy-setup
 
-| 도구 | 버전 | 용도 |
-|------|------|------|
-| [Claude Code](https://claude.ai/code) | latest | 하네스 실행 환경 |
-| [Codex CLI](https://github.com/openai/codex) | latest | 외부 평가 모델 #1 |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) 또는 [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) | latest | 외부 평가 모델 #2 |
-| Python | 3.12+ | eval_dispatch.py 실행 |
+# 2) 가장 작은 워크플로우로 시작
+/ahoy "작은 FastAPI 엔드포인트 하나 만들어줘"
+```
 
-> 최소 2개 외부 모델 CLI가 설치되어야 컨센서스가 성립합니다.
+처음엔 `sprint-001` 계약, 구현, 외부 평가 결과가 순서대로 만들어집니다.
+
+### 선행 조건
+
+| 요구사항 | 버전 | 왜 필요한가 |
+|---|---|---|
+| [Claude Code](https://claude.ai/code) | latest | 플러그인 실행 환경 |
+| Python | 3.12+ | 하네스 스크립트 실행 |
+| uv | 최신 | Hook 실행 및 검증 |
+| 외부 평가 CLI | 1개 이상 | 최소 Advisory 점검 |
+| 외부 평가 CLI | 2개 이상 | Strict(컨센서스) 모드 |
+
+Advisory 모드: 평가기 1개만 있어도 피드백을 받을 수 있습니다. Strict 모드: `min_models >= 2`(기본값)로 두 모델 이상 합의를 요구하면 승인 기준이 강화됩니다.
+
+> `ahoy_config.json`의 `eval_models`와 `min_models`를 바꿔 모드와 기준을 조정할 수 있습니다.
 
 <details>
 <summary>대안: 로컬 개발 모드</summary>
@@ -72,7 +74,7 @@ claude --plugin-dir /path/to/ahoy
 ```
 </details>
 
-### 사용법
+## 사용법
 
 ```bash
 # 새 프로젝트 시작
