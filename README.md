@@ -24,6 +24,8 @@
 
 **One sentence:** AHOY is an **external review gate** that keeps AI coding agents from grading their own code.
 
+AHOY is **not** a general-purpose agent framework; it is a review gate for AI-generated code.
+
 AI agents can overstate completion, so AHOY forces an independent verdict before a task is accepted.
 
 ### Use Ahoy when / Do not use Ahoy when
