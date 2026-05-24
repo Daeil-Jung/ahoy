@@ -23,8 +23,21 @@ Run all checks below **in parallel where possible** using the Bash tool:
 python3 --version 2>/dev/null || python --version 2>/dev/null
 ```
 
-- Required: 3.10+
-- If missing: instruct the user to install Python
+- Required: 3.12+
+- If missing: instruct the user to install Python 3.12+
+
+### 0. Doctor diagnostics
+
+```bash
+python scripts/doctor.py --project-root .
+```
+
+This runs timeout-safe environment checks and prints a recommendation:
+- `blocked`: no usable evaluators
+- `advisory`: one usable evaluator (`min_models=1`)
+- `strict`: two or more usable evaluators (`min_models=2`)
+
+Use the recommendation to drive `ahoy_config.json` setup for strict-vs-advisory mode.
 
 ### 2. External Model CLIs (at least 2 required)
 
