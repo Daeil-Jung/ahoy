@@ -26,35 +26,34 @@ python3 --version 2>/dev/null || python --version 2>/dev/null
 - Required: 3.12+
 - If missing: instruct the user to install Python 3.12+
 
-### 0. Doctor diagnostics
+### 2. Doctor diagnostics
 
 ```bash
-python scripts/doctor.py --project-root .
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${CLAUDE_PLUGIN_ROOT}" --json \
+  || python "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${CLAUDE_PLUGIN_ROOT}" --json
 ```
 
-This runs timeout-safe environment checks and prints a recommendation:
-- `blocked`: no usable evaluators
-- `advisory`: one usable evaluator (`min_models=1`)
-- `strict`: two or more usable evaluators (`min_models=2`)
+This runs timeout-safe environment checks from the plugin root and prints a recommendation:
+- `blocked`: no authenticated evaluators are usable yet
+- `advisory`: one authenticated evaluator (`min_models=1`)
+- `strict`: two or more authenticated evaluators (`min_models=2`)
 
-Use the recommendation to drive `ahoy_config.json` setup for strict-vs-advisory mode.
+Use the doctor result as the only source of truth for external CLI availability, auth state, and strict-vs-advisory mode. Do not run raw evaluator `--version` probes in setup; the doctor owns those checks with bounded timeouts and separates installed/version/auth/usable states.
 
-### 2. External Model CLIs (doctor-driven recommendation)
+### 3. External Model CLIs (doctor-driven recommendation)
 
-```bash
-codex --version 2>/dev/null; echo "exit:$?"
-gemini --version 2>/dev/null; echo "exit:$?"
-claude --version 2>/dev/null; echo "exit:$?"
-```
-
-- Record which CLIs are available
-- Use doctor recommendation to decide mode:
-  - `advisory`: 1 usable CLI (set `min_models: 1`)
-  - `strict`: 2+ usable CLIs (set `min_models: 2`)
+- Record CLI state from the doctor JSON fields:
+  - `installed`
+  - `version_check`
+  - `auth_check`
+  - `usable_for_eval`
+- Use only entries with `usable_for_eval: true` when writing `ahoy_config.json`:
+  - `advisory`: 1 usable/authenticated CLI (set `min_models: 1`)
+  - `strict`: 2+ usable/authenticated CLIs (set `min_models: 2`)
 
 - In strict mode, consensus is available when 2+ CLIs are usable.
 
-### 3. uv (Python package runner)
+### 4. uv (Python package runner)
 
 ```bash
 uv --version 2>/dev/null
@@ -63,7 +62,7 @@ uv --version 2>/dev/null
 - Required for hook enforcement (`uv run python` in hooks.json)
 - If missing: `pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-### 4. Plugin installation verification
+### 5. Plugin installation verification
 
 ```bash
 echo "${CLAUDE_PLUGIN_ROOT:-NOT_SET}"
@@ -72,14 +71,14 @@ echo "${CLAUDE_PLUGIN_ROOT:-NOT_SET}"
 - If `CLAUDE_PLUGIN_ROOT` is set, plugin is correctly installed
 - If not set, user may be running via `--plugin-dir` (still works)
 
-### 5. Validate scripts exist
+### 6. Validate scripts exist
 
 Check that the following files exist relative to the plugin root:
 - `scripts/eval_dispatch.py`
 - `scripts/validate_harness.py`
 - `hooks/hooks.json`
 
-### 6. Quick validation dry-run
+### 7. Quick validation dry-run
 
 ```bash
 uv run python "${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py" --help 2>/dev/null; echo "exit:$?"

@@ -64,56 +64,76 @@ def _error_prefix(kind: str, message: str) -> str:
 
 
 def probe_python(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    failures: list[dict[str, Any]] = []
+    required = ">={0}.{1}".format(*REQUIRED_PYTHON)
+
     for command in ("python3", "python"):
         try:
             result = _run_command([command, "--version"], timeout=timeout)
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "version": None,
-                "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
-                "error": _error_prefix("timeout", f"{command} --version timed out after {timeout:.1f}s"),
-            }
+            failures.append(
+                {
+                    "ok": False,
+                    "version": None,
+                    "required": required,
+                    "error": _error_prefix("timeout", f"{command} --version timed out after {timeout:.1f}s"),
+                }
+            )
+            continue
 
         output = f"{result.stdout} {result.stderr}".strip()
         version = _extract_version(output)
         if result.returncode != 0:
-            return {
-                "ok": False,
-                "version": version,
-                "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
-                "error": _error_prefix("non_zero_exit", f"{command} --version exit code {result.returncode}: {_trim_error(output)}"),
-            }
+            failures.append(
+                {
+                    "ok": False,
+                    "version": version,
+                    "required": required,
+                    "error": _error_prefix(
+                        "non_zero_exit",
+                        f"{command} --version exit code {result.returncode}: {_trim_error(output)}",
+                    ),
+                }
+            )
+            continue
         if not version:
-            return {
-                "ok": False,
-                "version": version,
-                "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
-                "error": _error_prefix("malformed_version", "Version output does not contain a parseable Python version"),
-            }
+            failures.append(
+                {
+                    "ok": False,
+                    "version": version,
+                    "required": required,
+                    "error": _error_prefix("malformed_version", "Version output does not contain a parseable Python version"),
+                }
+            )
+            continue
 
-        ok = _compare_python_version(version)
-        if not ok:
-            return {
-                "ok": False,
-                "version": version,
-                "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
-                "error": f"Python {version} does not satisfy required >= {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]}",
-            }
+        if not _compare_python_version(version):
+            failures.append(
+                {
+                    "ok": False,
+                    "version": version,
+                    "required": required,
+                    "error": f"{command} resolved to Python {version}, below required >= {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]}",
+                }
+            )
+            continue
 
         return {
             "ok": True,
             "version": version,
-            "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
+            "required": required,
             "error": "",
         }
+
+    if failures:
+        return failures[-1]
 
     return {
         "ok": False,
         "version": None,
-        "required": ">={0}.{1}".format(*REQUIRED_PYTHON),
+        "required": required,
         "error": _error_prefix("missing", "python executable is missing from PATH"),
     }
 
@@ -193,8 +213,8 @@ def _probe_evaluator(name: str, command: tuple[str, ...], timeout: float) -> dic
         "installed": True,
         "version_check": "ok",
         "auth_check": "unknown",
-        "usable_for_eval": True,
-        "error": "",
+        "usable_for_eval": False,
+        "error": "auth_unknown: version command succeeded, but evaluator authentication was not verified",
         "version": version,
         "path": shutil.which(command[0]),
         "raw_version_output": output,

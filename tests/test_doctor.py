@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -13,10 +14,9 @@ from conftest import load_module
 doctor = load_module("test_doctor_module", "scripts/doctor.py")
 
 
-def make_fake_executable(path: Path, content: str) -> Path:
+def make_fake_python_stub(path: Path, content: str) -> tuple[str, str]:
     path.write_text(content, encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    return (sys.executable, str(path))
 
 
 def run_with_fake_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_paths: list[str] | None = None) -> None:
@@ -24,14 +24,13 @@ def run_with_fake_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_pa
     if extra_paths:
         paths.extend(extra_paths)
     paths.append(os.environ.get("PATH", ""))
-    monkeypatch.setenv("PATH", ":".join(filter(None, paths)))
+    monkeypatch.setenv("PATH", os.pathsep.join(filter(None, paths)))
 
 
 def test_timeout_evaluator_probe_is_distinct(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake = tmp_path / "codex"
-    make_fake_executable(
-        fake,
-        "#!/usr/bin/env sh\nsleep 2\nprintf 'codex 0.9.0'\n",
+    command = make_fake_python_stub(
+        tmp_path / "codex_stub.py",
+        "import time\ntime.sleep(2)\nprint('codex 0.9.0')\n",
     )
     run_with_fake_path(tmp_path, monkeypatch, [])
 
@@ -39,7 +38,7 @@ def test_timeout_evaluator_probe_is_distinct(monkeypatch: pytest.MonkeyPatch, tm
     result = doctor.run_diagnostics(
         tmp_path,
         timeout=0.2,
-        evaluators=[("codex", ("codex", "--version"))],
+        evaluators=[("codex", command)],
     )
     elapsed = time.perf_counter() - start
 
@@ -50,14 +49,8 @@ def test_timeout_evaluator_probe_is_distinct(monkeypatch: pytest.MonkeyPatch, tm
 
 
 def test_missing_and_bad_evaluator_states(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    make_fake_executable(
-        tmp_path / "bad_exit",
-        "#!/usr/bin/env sh\nexit 1\n",
-    )
-    make_fake_executable(
-        tmp_path / "bad_version",
-        "#!/usr/bin/env sh\necho 'not-a-version'\n",
-    )
+    bad_exit = make_fake_python_stub(tmp_path / "bad_exit.py", "import sys\nsys.exit(1)\n")
+    bad_version = make_fake_python_stub(tmp_path / "bad_version.py", "print('not-a-version')\n")
     run_with_fake_path(tmp_path, monkeypatch, [])
 
     result = doctor.run_diagnostics(
@@ -65,8 +58,8 @@ def test_missing_and_bad_evaluator_states(monkeypatch: pytest.MonkeyPatch, tmp_p
         timeout=2,
         evaluators=[
             ("missing", ("missing", "--version")),
-            ("bad_exit", ("bad_exit", "--version")),
-            ("bad_version", ("bad_version", "--version")),
+            ("bad_exit", bad_exit),
+            ("bad_version", bad_version),
         ],
     )
 
@@ -85,6 +78,41 @@ def test_missing_and_bad_evaluator_states(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "malformed_version" in by_name["bad_version"]["error"]
 
 
+def test_version_only_evaluator_is_not_eval_usable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    command = make_fake_python_stub(tmp_path / "codex_stub.py", "print('codex 0.5.0')\n")
+    run_with_fake_path(tmp_path, monkeypatch, [])
+
+    result = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("codex", command)],
+    )
+
+    evaluator = result["evaluators"][0]
+    assert evaluator["version_check"] == "ok"
+    assert evaluator["auth_check"] == "unknown"
+    assert evaluator["usable_for_eval"] is False
+    assert "auth_unknown" in evaluator["error"]
+    assert result["recommendation"]["mode"] == "blocked"
+
+
+def test_python_probe_falls_back_after_unsupported_python3(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], timeout: float) -> object:
+        executable = command[0]
+        if executable == "python3":
+            return type("Result", (), {"stdout": "Python 3.11.8", "stderr": "", "returncode": 0})()
+        if executable == "python":
+            return type("Result", (), {"stdout": "Python 3.12.1", "stderr": "", "returncode": 0})()
+        raise AssertionError(executable)
+
+    monkeypatch.setattr(doctor, "_run_command", fake_run)
+
+    result = doctor.probe_python(timeout=1)
+
+    assert result["ok"] is True
+    assert result["version"] == "3.12.1"
+
+
 @pytest.mark.parametrize(
     "usable_count, expected_mode, expected_min",
     [
@@ -94,27 +122,23 @@ def test_missing_and_bad_evaluator_states(monkeypatch: pytest.MonkeyPatch, tmp_p
     ],
 )
 def test_recommendation_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, usable_count: int, expected_mode: str, expected_min: int) -> None:
-    specs: list[tuple[str, tuple[str, ...]]] = []
+    specs = [(f"eval_{i}", (f"eval_{i}", "--version")) for i in range(2)]
 
-    for i in range(usable_count):
-        evaluator = tmp_path / f"good_{i}"
-        make_fake_executable(evaluator, "#!/usr/bin/env sh\necho 'v0.0.1'\n")
-        specs.append((f"good_{i}", (f"good_{i}", "--version")))
+    def fake_probe(name: str, command: tuple[str, ...], timeout: float) -> dict[str, object]:
+        index = int(name.rsplit("_", 1)[1])
+        usable = index < usable_count
+        return {
+            "name": name,
+            "installed": True,
+            "version_check": "ok",
+            "auth_check": "ok" if usable else "failed",
+            "usable_for_eval": usable,
+            "error": "" if usable else "auth_failed",
+            "version": "0.0.1",
+            "path": command[0],
+        }
 
-    while len(specs) < 2:
-        bad_name = f"bad_{len(specs)}"
-        make_fake_executable(
-            tmp_path / bad_name,
-            "#!/usr/bin/env sh\necho 'invalid'\n",
-        )
-        specs.append((bad_name, (bad_name, "--version")))
-
-    if usable_count < 2:
-        extras = []
-    else:
-        extras = []
-
-    run_with_fake_path(tmp_path, monkeypatch, extras)
+    monkeypatch.setattr(doctor, "_probe_evaluator", fake_probe)
     result = doctor.run_diagnostics(tmp_path, timeout=2, evaluators=specs)
 
     assert result["recommendation"]["mode"] == expected_mode
@@ -123,16 +147,13 @@ def test_recommendation_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, u
 
 
 def test_doctor_json_schema_includes_setup_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    make_fake_executable(
-        tmp_path / "codex",
-        "#!/usr/bin/env sh\nprintf 'codex 0.5.0'\n",
-    )
+    command = make_fake_python_stub(tmp_path / "codex_stub.py", "print('codex 0.5.0')\n")
     run_with_fake_path(tmp_path, monkeypatch, [])
 
     payload = doctor.run_diagnostics(
         tmp_path,
         timeout=1,
-        evaluators=[("codex", ("codex", "--version"))],
+        evaluators=[("codex", command)],
     )
     dumped = json.loads(json.dumps(payload))
 
@@ -149,7 +170,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_setup_skill_contract_is_documented() -> None:
     content = (ROOT / "skills/ahoy-setup/SKILL.md").read_text(encoding="utf-8")
-    assert "python scripts/doctor.py --project-root" in content
+    assert "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" in content
+    assert "python scripts/doctor.py --project-root ." not in content
     assert "recommendation" in content
     assert "Python | 3.12+" in content or "Required: 3.12+" in content
 
@@ -190,4 +212,3 @@ def test_python_requirement_wiring_matches_readme_and_setup_docs() -> None:
     assert "3.12+" in docko
     assert "3.12" in claude
     assert "3.12+" in setup
-
