@@ -17,7 +17,7 @@ DEFAULT_EVALUATORS = (
 )
 EVALUATOR_AUTH_ARGS = {
     "claude": ("auth", "status"),
-    "codex": ("auth", "status"),
+    "codex": ("login", "status"),
     "gemini": ("auth", "status"),
 }
 REQUIRED_PYTHON = (3, 12)

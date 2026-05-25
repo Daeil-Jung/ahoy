@@ -105,12 +105,48 @@ def test_version_only_evaluator_is_not_eval_usable(monkeypatch: pytest.MonkeyPat
     assert "usable" in result["recommendation"]["reason"]
 
 
-def test_real_probe_path_reaches_advisory_and_strict_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    evaluator = (*make_fake_python_stub(
-        tmp_path / "evaluator_stub.py",
+def test_codex_real_probe_path_uses_login_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    command = (*make_fake_python_stub(
+        tmp_path / "codex_stub.py",
         "import sys\n"
         "if sys.argv[1:] == ['--version']:\n"
-        "    print('eval 1.2.3')\n"
+        "    print('codex 1.2.3')\n"
+        "elif sys.argv[1:] == ['login', 'status']:\n"
+        "    print('authenticated')\n"
+        "else:\n"
+        "    print('unsupported auth command', sys.argv[1:])\n"
+        "    sys.exit(2)\n",
+    ), "--version")
+    run_with_fake_path(tmp_path, monkeypatch, [])
+
+    result = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("codex", command)],
+    )
+
+    evaluator = result["evaluators"][0]
+    assert evaluator["auth_check"] == "ok"
+    assert evaluator["usable_for_eval"] is True
+    assert result["recommendation"]["mode"] == "advisory"
+
+
+def test_real_probe_path_reaches_advisory_and_strict_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    codex = (*make_fake_python_stub(
+        tmp_path / "codex_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('codex 1.2.3')\n"
+        "elif sys.argv[1:] == ['login', 'status']:\n"
+        "    print('authenticated')\n"
+        "else:\n"
+        "    sys.exit(2)\n",
+    ), "--version")
+    claude = (*make_fake_python_stub(
+        tmp_path / "claude_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude 1.2.3')\n"
         "elif sys.argv[1:] == ['auth', 'status']:\n"
         "    print('authenticated')\n"
         "else:\n"
@@ -121,12 +157,12 @@ def test_real_probe_path_reaches_advisory_and_strict_modes(monkeypatch: pytest.M
     advisory = doctor.run_diagnostics(
         tmp_path,
         timeout=1,
-        evaluators=[("codex", evaluator)],
+        evaluators=[("codex", codex)],
     )
     strict = doctor.run_diagnostics(
         tmp_path,
         timeout=1,
-        evaluators=[("codex", evaluator), ("claude", evaluator)],
+        evaluators=[("codex", codex), ("claude", claude)],
     )
 
     assert advisory["evaluators"][0]["auth_check"] == "ok"
