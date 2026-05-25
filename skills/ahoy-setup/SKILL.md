@@ -29,11 +29,16 @@ python3 --version 2>/dev/null || python --version 2>/dev/null
 ### 2. Doctor diagnostics
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${CLAUDE_PLUGIN_ROOT}" --json \
-  || python "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${CLAUDE_PLUGIN_ROOT}" --json
+AHOY_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(pwd)}"
+if [ ! -f "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" ]; then
+  echo "Unable to locate AHOY plugin root. Set CLAUDE_PLUGIN_ROOT to the plugin install directory or run setup from the plugin root."
+  exit 2
+fi
+python3 "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${AHOY_PLUGIN_ROOT}" --json \
+  || python "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${AHOY_PLUGIN_ROOT}" --json
 ```
 
-This runs timeout-safe environment checks from the plugin root and prints a recommendation:
+This resolves the plugin root from `CLAUDE_PLUGIN_ROOT` when available, falls back to the current directory for `--plugin-dir` runs, and fails fast with an actionable message if neither points at AHOY. It runs timeout-safe environment checks from the plugin root and prints a recommendation:
 - `blocked`: no authenticated evaluators are usable yet
 - `advisory`: one authenticated evaluator (`min_models=1`)
 - `strict`: two or more authenticated evaluators (`min_models=2`)

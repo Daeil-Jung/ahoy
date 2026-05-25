@@ -79,7 +79,15 @@ def test_missing_and_bad_evaluator_states(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_version_only_evaluator_is_not_eval_usable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    command = make_fake_python_stub(tmp_path / "codex_stub.py", "print('codex 0.5.0')\n")
+    command = (*make_fake_python_stub(
+        tmp_path / "codex_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('codex 0.5.0')\n"
+        "else:\n"
+        "    print('auth unavailable')\n"
+        "    sys.exit(1)\n",
+    ), "--version")
     run_with_fake_path(tmp_path, monkeypatch, [])
 
     result = doctor.run_diagnostics(
@@ -90,10 +98,43 @@ def test_version_only_evaluator_is_not_eval_usable(monkeypatch: pytest.MonkeyPat
 
     evaluator = result["evaluators"][0]
     assert evaluator["version_check"] == "ok"
-    assert evaluator["auth_check"] == "unknown"
+    assert evaluator["auth_check"] == "failed"
     assert evaluator["usable_for_eval"] is False
-    assert "auth_unknown" in evaluator["error"]
+    assert "auth_failed" in evaluator["error"]
     assert result["recommendation"]["mode"] == "blocked"
+    assert "usable" in result["recommendation"]["reason"]
+
+
+def test_real_probe_path_reaches_advisory_and_strict_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    evaluator = (*make_fake_python_stub(
+        tmp_path / "evaluator_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('eval 1.2.3')\n"
+        "elif sys.argv[1:] == ['auth', 'status']:\n"
+        "    print('authenticated')\n"
+        "else:\n"
+        "    sys.exit(2)\n",
+    ), "--version")
+    run_with_fake_path(tmp_path, monkeypatch, [])
+
+    advisory = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("codex", evaluator)],
+    )
+    strict = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("codex", evaluator), ("claude", evaluator)],
+    )
+
+    assert advisory["evaluators"][0]["auth_check"] == "ok"
+    assert advisory["evaluators"][0]["usable_for_eval"] is True
+    assert advisory["recommendation"]["mode"] == "advisory"
+    assert advisory["recommendation"]["min_models"] == 1
+    assert strict["recommendation"]["mode"] == "strict"
+    assert strict["recommendation"]["min_models"] == 2
 
 
 def test_python_probe_falls_back_after_unsupported_python3(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,10 +211,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_setup_skill_contract_is_documented() -> None:
     content = (ROOT / "skills/ahoy-setup/SKILL.md").read_text(encoding="utf-8")
-    assert "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py" in content
+    assert "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" in content
     assert "python scripts/doctor.py --project-root ." not in content
     assert "recommendation" in content
     assert "Python | 3.12+" in content or "Required: 3.12+" in content
+
+
+def test_setup_skill_contract_handles_unset_claude_plugin_root() -> None:
+    content = (ROOT / "skills/ahoy-setup/SKILL.md").read_text(encoding="utf-8")
+    assert "AHOY_PLUGIN_ROOT=\"${CLAUDE_PLUGIN_ROOT:-$(pwd)}\"" in content
+    assert 'if [ ! -f "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" ]; then' in content
+    assert "Unable to locate AHOY plugin root" in content
 
 
 def test_setup_skill_contract_respects_advisory_min_models() -> None:

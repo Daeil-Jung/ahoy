@@ -15,6 +15,11 @@ DEFAULT_EVALUATORS = (
     "codex",
     "gemini",
 )
+EVALUATOR_AUTH_ARGS = {
+    "claude": ("auth", "status"),
+    "codex": ("auth", "status"),
+    "gemini": ("auth", "status"),
+}
 REQUIRED_PYTHON = (3, 12)
 
 
@@ -155,6 +160,31 @@ def probe_uv(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     return {"ok": True, "version": version, "error": ""}
 
 
+def _probe_evaluator_auth(name: str, command: tuple[str, ...], timeout: float) -> dict[str, str | bool]:
+    auth_args = EVALUATOR_AUTH_ARGS.get(name, ("auth", "status"))
+    base_command = command[:-1] if command[-1:] == ("--version",) else command
+    auth_command = [*base_command, *auth_args]
+    try:
+        result = _run_command(auth_command, timeout=timeout)
+    except FileNotFoundError:
+        return {"auth_check": "failed", "usable_for_eval": False, "error": "auth_failed: evaluator disappeared before auth probe"}
+    except subprocess.TimeoutExpired:
+        return {
+            "auth_check": "timeout",
+            "usable_for_eval": False,
+            "error": f"auth_timeout: {' '.join(auth_command)} exceeded {timeout:.1f}s",
+        }
+
+    output = f"{result.stdout} {result.stderr}".strip()
+    if result.returncode == 0:
+        return {"auth_check": "ok", "usable_for_eval": True, "error": ""}
+    return {
+        "auth_check": "failed",
+        "usable_for_eval": False,
+        "error": _error_prefix("auth_failed", f"{' '.join(auth_command)} exit code {result.returncode}: {_trim_error(output)}"),
+    }
+
+
 def _probe_evaluator(name: str, command: tuple[str, ...], timeout: float) -> dict[str, Any]:
     try:
         result = _run_command(list(command), timeout=timeout)
@@ -208,13 +238,14 @@ def _probe_evaluator(name: str, command: tuple[str, ...], timeout: float) -> dic
             "raw_version_output": output,
         }
 
+    auth = _probe_evaluator_auth(name, command, timeout)
     return {
         "name": name,
         "installed": True,
         "version_check": "ok",
-        "auth_check": "unknown",
-        "usable_for_eval": False,
-        "error": "auth_unknown: version command succeeded, but evaluator authentication was not verified",
+        "auth_check": auth["auth_check"],
+        "usable_for_eval": auth["usable_for_eval"],
+        "error": auth["error"],
         "version": version,
         "path": shutil.which(command[0]),
         "raw_version_output": output,
@@ -246,7 +277,7 @@ def run_diagnostics(
             "eval_models": [],
             "min_models": 0,
             "strict_gate_warning": "No usable external evaluators found. Configure at least one evaluator before running evaluation.",
-            "reason": "No evaluators returned version_check=ok",
+            "reason": "No evaluators are authenticated and usable for evaluation",
         }
     elif len(usable) == 1:
         recommendation = {
