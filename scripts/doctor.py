@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,7 +19,9 @@ DEFAULT_EVALUATORS = (
 EVALUATOR_AUTH_ARGS = {
     "claude": ("auth", "status"),
     "codex": ("login", "status"),
-    "gemini": ("auth", "status"),
+}
+EVALUATOR_AUTH_ENV_VARS = {
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
 }
 REQUIRED_PYTHON = (3, 12)
 
@@ -76,6 +79,16 @@ def probe_python(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
         try:
             result = _run_command([command, "--version"], timeout=timeout)
         except FileNotFoundError:
+            continue
+        except PermissionError:
+            failures.append(
+                {
+                    "ok": False,
+                    "version": None,
+                    "required": required,
+                    "error": _error_prefix("permission_denied", f"{command} --version is not executable"),
+                }
+            )
             continue
         except subprocess.TimeoutExpired:
             failures.append(
@@ -148,6 +161,8 @@ def probe_uv(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
         result = _run_command(["uv", "--version"], timeout=timeout)
     except FileNotFoundError:
         return {"ok": False, "version": None, "error": "missing: uv not found in PATH"}
+    except PermissionError:
+        return {"ok": False, "version": None, "error": "permission_denied: uv --version is not executable"}
     except subprocess.TimeoutExpired:
         return {"ok": False, "version": None, "error": f"timeout: uv --version exceeded {timeout:.1f}s"}
 
@@ -161,6 +176,18 @@ def probe_uv(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
 
 
 def _probe_evaluator_auth(name: str, command: tuple[str, ...], timeout: float) -> dict[str, str | bool]:
+    env_vars = EVALUATOR_AUTH_ENV_VARS.get(name, ())
+    if env_vars:
+        for variable in env_vars:
+            if os.environ.get(variable):
+                return {"auth_check": "ok", "usable_for_eval": True, "error": ""}
+        if name not in EVALUATOR_AUTH_ARGS:
+            return {
+                "auth_check": "not_checked",
+                "usable_for_eval": False,
+                "error": "auth_unsupported: no timeout-safe non-interactive auth status command; set GEMINI_API_KEY or GOOGLE_API_KEY",
+            }
+
     auth_args = EVALUATOR_AUTH_ARGS.get(name, ("auth", "status"))
     base_command = command[:-1] if command[-1:] == ("--version",) else command
     auth_command = [*base_command, *auth_args]
@@ -168,6 +195,12 @@ def _probe_evaluator_auth(name: str, command: tuple[str, ...], timeout: float) -
         result = _run_command(auth_command, timeout=timeout)
     except FileNotFoundError:
         return {"auth_check": "failed", "usable_for_eval": False, "error": "auth_failed: evaluator disappeared before auth probe"}
+    except PermissionError:
+        return {
+            "auth_check": "failed",
+            "usable_for_eval": False,
+            "error": _error_prefix("permission_denied", f"{' '.join(auth_command)} is not executable"),
+        }
     except subprocess.TimeoutExpired:
         return {
             "auth_check": "timeout",
@@ -207,6 +240,17 @@ def _probe_evaluator(name: str, command: tuple[str, ...], timeout: float) -> dic
             "auth_check": "not_checked",
             "usable_for_eval": False,
             "error": f"timeout: {' '.join(command)} exceeded {timeout:.1f}s",
+            "version": None,
+            "path": shutil.which(command[0]),
+        }
+    except PermissionError:
+        return {
+            "name": name,
+            "installed": True,
+            "version_check": "failed",
+            "auth_check": "not_checked",
+            "usable_for_eval": False,
+            "error": _error_prefix("permission_denied", f"{' '.join(command)} is not executable"),
             "version": None,
             "path": shutil.which(command[0]),
         }

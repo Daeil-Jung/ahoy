@@ -190,6 +190,116 @@ def test_python_probe_falls_back_after_unsupported_python3(monkeypatch: pytest.M
     assert result["version"] == "3.12.1"
 
 
+def test_python_probe_skips_non_executable_python3(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], timeout: float) -> object:
+        executable = command[0]
+        if executable == "python3":
+            raise PermissionError("permission denied")
+        if executable == "python":
+            return type("Result", (), {"stdout": "Python 3.12.1", "stderr": "", "returncode": 0})()
+        raise AssertionError(executable)
+
+    monkeypatch.setattr(doctor, "_run_command", fake_run)
+
+    result = doctor.probe_python(timeout=1)
+
+    assert result["ok"] is True
+    assert result["version"] == "3.12.1"
+
+
+def test_uv_probe_reports_non_executable_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], timeout: float) -> object:
+        if command == ["uv", "--version"]:
+            raise PermissionError("permission denied")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(doctor, "_run_command", fake_run)
+
+    result = doctor.probe_uv(timeout=1)
+
+    assert result["ok"] is False
+    assert result["version"] is None
+    assert "permission_denied" in result["error"]
+
+
+def test_evaluator_probe_reports_non_executable_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_run(command: list[str], timeout: float) -> object:
+        if command == ["python3", "--version"]:
+            return type("Result", (), {"stdout": "Python 3.12.1", "stderr": "", "returncode": 0})()
+        if command == ["uv", "--version"]:
+            return type("Result", (), {"stdout": "uv 0.9.0", "stderr": "", "returncode": 0})()
+        if command == ["codex", "--version"]:
+            raise PermissionError("permission denied")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(doctor, "_run_command", fake_run)
+
+    result = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("codex", ("codex", "--version"))],
+    )
+
+    evaluator = result["evaluators"][0]
+    assert evaluator["version_check"] == "failed"
+    assert evaluator["usable_for_eval"] is False
+    assert "permission_denied" in evaluator["error"]
+    assert result["recommendation"]["mode"] == "blocked"
+
+
+def test_gemini_auth_uses_supported_api_key_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    command = (*make_fake_python_stub(
+        tmp_path / "gemini_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('gemini 1.2.3')\n"
+        "else:\n"
+        "    print('unexpected auth subcommand', sys.argv[1:])\n"
+        "    sys.exit(2)\n",
+    ), "--version")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    run_with_fake_path(tmp_path, monkeypatch, [])
+
+    result = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("gemini", command)],
+    )
+
+    evaluator = result["evaluators"][0]
+    assert evaluator["auth_check"] == "ok"
+    assert evaluator["usable_for_eval"] is True
+    assert result["recommendation"]["mode"] == "advisory"
+
+
+def test_gemini_without_api_key_fails_without_unsupported_auth_subcommand(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    command = (*make_fake_python_stub(
+        tmp_path / "gemini_stub.py",
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('gemini 1.2.3')\n"
+        "else:\n"
+        "    print('unexpected auth subcommand', sys.argv[1:])\n"
+        "    sys.exit(2)\n",
+    ), "--version")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    run_with_fake_path(tmp_path, monkeypatch, [])
+
+    result = doctor.run_diagnostics(
+        tmp_path,
+        timeout=1,
+        evaluators=[("gemini", command)],
+    )
+
+    evaluator = result["evaluators"][0]
+    assert evaluator["auth_check"] == "not_checked"
+    assert evaluator["usable_for_eval"] is False
+    assert "auth_unsupported" in evaluator["error"]
+    assert result["recommendation"]["mode"] == "blocked"
+
+
 @pytest.mark.parametrize(
     "usable_count, expected_mode, expected_min",
     [
