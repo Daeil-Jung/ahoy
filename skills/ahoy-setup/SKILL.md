@@ -23,21 +23,42 @@ Run all checks below **in parallel where possible** using the Bash tool:
 python3 --version 2>/dev/null || python --version 2>/dev/null
 ```
 
-- Required: 3.10+
-- If missing: instruct the user to install Python
+- Required: 3.12+
+- If missing: instruct the user to install Python 3.12+
 
-### 2. External Model CLIs (at least 2 required)
+### 2. Doctor diagnostics
 
 ```bash
-codex --version 2>/dev/null; echo "exit:$?"
-gemini --version 2>/dev/null; echo "exit:$?"
-claude --version 2>/dev/null; echo "exit:$?"
+AHOY_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(pwd)}"
+if [ ! -f "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" ]; then
+  echo "Unable to locate AHOY plugin root. Set CLAUDE_PLUGIN_ROOT to the plugin install directory or run setup from the plugin root."
+  exit 2
+fi
+python3 "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${AHOY_PLUGIN_ROOT}" --json \
+  || python "${AHOY_PLUGIN_ROOT}/scripts/doctor.py" --project-root "${AHOY_PLUGIN_ROOT}" --json
 ```
 
-- Record which CLIs are available
-- At least 2 must be present for consensus evaluation
+This resolves the plugin root from `CLAUDE_PLUGIN_ROOT` when available, falls back to the current directory for `--plugin-dir` runs, and fails fast with an actionable message if neither points at AHOY. It runs timeout-safe environment checks from the plugin root and prints a recommendation:
+- `blocked`: no authenticated evaluators are usable yet
+- `advisory`: one authenticated evaluator (`min_models=1`)
+- `strict`: two or more authenticated evaluators (`min_models=2`)
 
-### 3. uv (Python package runner)
+Use the doctor result as the only source of truth for external CLI availability, auth state, and strict-vs-advisory mode. Do not run raw evaluator `--version` probes in setup; the doctor owns those checks with bounded timeouts and separates installed/version/auth/usable states.
+
+### 3. External Model CLIs (doctor-driven recommendation)
+
+- Record CLI state from the doctor JSON fields:
+  - `installed`
+  - `version_check`
+  - `auth_check`
+  - `usable_for_eval`
+- Use only entries with `usable_for_eval: true` when writing `ahoy_config.json`:
+  - `advisory`: 1 usable/authenticated CLI (set `min_models: 1`)
+  - `strict`: 2+ usable/authenticated CLIs (set `min_models: 2`)
+
+- In strict mode, consensus is available when 2+ CLIs are usable.
+
+### 4. uv (Python package runner)
 
 ```bash
 uv --version 2>/dev/null
@@ -46,7 +67,7 @@ uv --version 2>/dev/null
 - Required for hook enforcement (`uv run python` in hooks.json)
 - If missing: `pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-### 4. Plugin installation verification
+### 5. Plugin installation verification
 
 ```bash
 echo "${CLAUDE_PLUGIN_ROOT:-NOT_SET}"
@@ -55,14 +76,14 @@ echo "${CLAUDE_PLUGIN_ROOT:-NOT_SET}"
 - If `CLAUDE_PLUGIN_ROOT` is set, plugin is correctly installed
 - If not set, user may be running via `--plugin-dir` (still works)
 
-### 5. Validate scripts exist
+### 6. Validate scripts exist
 
 Check that the following files exist relative to the plugin root:
 - `scripts/eval_dispatch.py`
 - `scripts/validate_harness.py`
 - `hooks/hooks.json`
 
-### 6. Quick validation dry-run
+### 7. Quick validation dry-run
 
 ```bash
 uv run python "${CLAUDE_PLUGIN_ROOT}/scripts/validate_harness.py" --help 2>/dev/null; echo "exit:$?"
@@ -89,7 +110,10 @@ Present results as a diagnostic table:
 | validate_harness.py | OK     | found                      |
 | hooks.json          | OK     | 7 hooks loaded             |
 
-**Result**: Ready (2/3 external models available)
+**Result** examples:
+
+- Advisory: Ready (1/3 external models available) with strict warning
+- Strict: Ready (2/3 or more external models available)
 ```
 
 ## After Checks — Auto-Install Phase
@@ -149,15 +173,29 @@ Explain that the `!` prefix runs the command in the current session so the inter
 After install & auth are complete, **ask the user which models to use for evaluation**.
 
 1. Present the list of **installed and authenticated** external model CLIs (e.g., codex, gemini, claude)
-2. **AskUserQuestion**: "평가에 사용할 외부 모델을 선택하세요 (최소 2개)" with options like:
-   - "codex, gemini"
-   - "codex, claude"
-   - "gemini, claude"
-   - "codex, gemini, claude (all)"
-   - Only show combinations where the CLIs are actually installed
+2. **AskUserQuestion**: "평가에 사용할 외부 모델을 선택하세요 (추천 모드에 따라 1개 이상 가능)" with options like:
+   - Advisory mode (show single-model options):
+     - "codex"
+     - "gemini"
+     - "claude"
+   - Strict mode (show combinations):
+     - "codex, gemini"
+     - "codex, claude"
+     - "gemini, claude"
+     - "codex, gemini, claude (all)"
+   - Only show model combinations that are both installed and authenticated
 3. Save the selection to `ahoy_config.json` in the plugin root:
 
 ```bash
+# Advisory example (min_models = 1)
+cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
+{
+  "eval_models": ["claude"],
+  "min_models": 1
+}
+CONF
+
+# Strict example (consensus mode, min_models = 2)
 cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
 {
   "eval_models": ["codex", "gemini"],
@@ -165,7 +203,6 @@ cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
 }
 CONF
 ```
-
 The `eval_models` array determines which models `eval_dispatch.py` calls. The `min_models` value sets the consensus threshold.
 
 If `ahoy_config.json` already exists, read it and show the current config. Ask if the user wants to change it.
