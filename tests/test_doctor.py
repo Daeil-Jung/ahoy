@@ -154,6 +154,32 @@ def test_setup_skill_contract_is_documented() -> None:
     assert "Python | 3.12+" in content or "Required: 3.12+" in content
 
 
+def test_setup_skill_contract_respects_advisory_min_models() -> None:
+    content = (ROOT / "skills/ahoy-setup/SKILL.md").read_text(encoding="utf-8")
+
+    lowered = content.lower()
+    assert "at least 2 required" not in lowered
+    assert "at least 2 must be present for consensus evaluation" not in lowered
+    assert "최소 2개" not in content
+
+    assert "advisory" in lowered
+    assert "strict" in lowered
+    assert "min_models" in content
+    assert '"min_models": 1' in content
+    assert '"min_models": 2' in content
+
+    section = content[content.index("AskUserQuestion"):]
+    assert '"codex"' in section and '"gemini"' in section and '"claude"' in section
+    assert '"codex, gemini"' in section
+    assert '"codex, claude"' in section
+    assert '"gemini, claude"' in section
+    assert '"codex, gemini, claude (all)"' in section
+    assert "# Advisory example (min_models = 1)" in content
+    assert "# Strict example (consensus mode, min_models = 2)" in content
+    assert '"eval_models": ["claude"]' in content
+    assert '"eval_models": ["codex", "gemini"]' in content
+
+
 def test_python_requirement_wiring_matches_readme_and_setup_docs() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     docko = (ROOT / "docs/README.ko.md").read_text(encoding="utf-8")

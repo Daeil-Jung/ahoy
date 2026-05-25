@@ -39,7 +39,7 @@ This runs timeout-safe environment checks and prints a recommendation:
 
 Use the recommendation to drive `ahoy_config.json` setup for strict-vs-advisory mode.
 
-### 2. External Model CLIs (at least 2 required)
+### 2. External Model CLIs (doctor-driven recommendation)
 
 ```bash
 codex --version 2>/dev/null; echo "exit:$?"
@@ -48,7 +48,11 @@ claude --version 2>/dev/null; echo "exit:$?"
 ```
 
 - Record which CLIs are available
-- At least 2 must be present for consensus evaluation
+- Use doctor recommendation to decide mode:
+  - `advisory`: 1 usable CLI (set `min_models: 1`)
+  - `strict`: 2+ usable CLIs (set `min_models: 2`)
+
+- In strict mode, consensus is available when 2+ CLIs are usable.
 
 ### 3. uv (Python package runner)
 
@@ -102,7 +106,10 @@ Present results as a diagnostic table:
 | validate_harness.py | OK     | found                      |
 | hooks.json          | OK     | 7 hooks loaded             |
 
-**Result**: Ready (2/3 external models available)
+**Result** examples:
+
+- Advisory: Ready (1/3 external models available) with strict warning
+- Strict: Ready (2/3 or more external models available)
 ```
 
 ## After Checks — Auto-Install Phase
@@ -162,15 +169,29 @@ Explain that the `!` prefix runs the command in the current session so the inter
 After install & auth are complete, **ask the user which models to use for evaluation**.
 
 1. Present the list of **installed and authenticated** external model CLIs (e.g., codex, gemini, claude)
-2. **AskUserQuestion**: "평가에 사용할 외부 모델을 선택하세요 (최소 2개)" with options like:
-   - "codex, gemini"
-   - "codex, claude"
-   - "gemini, claude"
-   - "codex, gemini, claude (all)"
-   - Only show combinations where the CLIs are actually installed
+2. **AskUserQuestion**: "평가에 사용할 외부 모델을 선택하세요 (추천 모드에 따라 1개 이상 가능)" with options like:
+   - Advisory mode (show single-model options):
+     - "codex"
+     - "gemini"
+     - "claude"
+   - Strict mode (show combinations):
+     - "codex, gemini"
+     - "codex, claude"
+     - "gemini, claude"
+     - "codex, gemini, claude (all)"
+   - Only show model combinations that are both installed and authenticated
 3. Save the selection to `ahoy_config.json` in the plugin root:
 
 ```bash
+# Advisory example (min_models = 1)
+cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
+{
+  "eval_models": ["claude"],
+  "min_models": 1
+}
+CONF
+
+# Strict example (consensus mode, min_models = 2)
 cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
 {
   "eval_models": ["codex", "gemini"],
@@ -178,7 +199,6 @@ cat > "${CLAUDE_PLUGIN_ROOT}/ahoy_config.json" <<'CONF'
 }
 CONF
 ```
-
 The `eval_models` array determines which models `eval_dispatch.py` calls. The `min_models` value sets the consensus threshold.
 
 If `ahoy_config.json` already exists, read it and show the current config. Ask if the user wants to change it.
