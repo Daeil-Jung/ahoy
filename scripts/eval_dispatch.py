@@ -16,6 +16,7 @@ Supported models:
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures
 import json
 import os
@@ -24,11 +25,16 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 # Detect Windows environment
 _IS_WINDOWS = sys.platform == "win32"
+
+MAX_DIFF_BYTES = 120_000
+MAX_DIFF_FILE_BYTES = 50_000
+MAX_CHANGED_FILES = 80
 
 
 def strip_generator_opinions(gen_report: str) -> str:
@@ -435,8 +441,226 @@ def resolve_reported_files(gen_report: str) -> list[str]:
     return list(dict.fromkeys(fallback_pattern.findall(gen_report)))
 
 
+def _run_git(project_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _is_git_worktree(project_root: Path) -> bool:
+    proc = _run_git(project_root, ["rev-parse", "--is-inside-work-tree"])
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def _has_git_head(project_root: Path) -> bool:
+    return _run_git(project_root, ["rev-parse", "--verify", "HEAD"]).returncode == 0
+
+
+def _empty_git_tree(project_root: Path) -> str:
+    proc = _run_git(project_root, ["hash-object", "-t", "tree", "/dev/null"])
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
+    return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def _is_harness_artifact_path(rel_path: str) -> bool:
+    return rel_path == ".claude/harness" or rel_path.startswith(".claude/harness/")
+
+
+def _filter_source_changes(changes: list[dict[str, str]]) -> list[dict[str, str]]:
+    source_changes: list[dict[str, str]] = []
+    for change in changes:
+        path_is_harness = _is_harness_artifact_path(change["path"])
+        old_path = change.get("old_path", "")
+        old_path_is_harness = bool(old_path and _is_harness_artifact_path(old_path))
+        if not path_is_harness and not old_path_is_harness:
+            source_changes.append(change)
+        elif path_is_harness and old_path and not old_path_is_harness:
+            source_changes.append({"status": " D", "type": "deleted", "path": old_path, "old_path": ""})
+        elif old_path_is_harness and not path_is_harness:
+            source_changes.append({"status": "A ", "type": "created", "path": change["path"], "old_path": ""})
+    return source_changes
+
+
+def _decode_porcelain_path(path: str) -> str:
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        try:
+            decoded = ast.literal_eval(path)
+        except (SyntaxError, ValueError):
+            return path
+        if isinstance(decoded, str):
+            try:
+                return decoded.encode("latin-1").decode("utf-8")
+            except UnicodeError:
+                return decoded
+    return path
+
+
+def _parse_porcelain_status(status_output: str) -> list[dict[str, str]]:
+    changes: list[dict[str, str]] = []
+    for raw in status_output.splitlines():
+        if not raw:
+            continue
+        status = raw[:2]
+        path_text = raw[3:]
+        old_path = ""
+        path = path_text
+        if " -> " in path_text:
+            old_path, path = path_text.split(" -> ", 1)
+        old_path = _decode_porcelain_path(old_path) if old_path else ""
+        path = _decode_porcelain_path(path)
+        change_type = "modified"
+        if status == "??":
+            change_type = "untracked"
+        elif "D" in status:
+            change_type = "deleted"
+        elif "R" in status:
+            change_type = "renamed"
+        elif "A" in status:
+            change_type = "created"
+        changes.append({"status": status, "type": change_type, "path": path, "old_path": old_path})
+    return changes
+
+
+def _changed_paths(changes: list[dict[str, str]]) -> list[str]:
+    paths: list[str] = []
+    for change in changes:
+        if change.get("old_path"):
+            paths.append(change["old_path"])
+        paths.append(change["path"])
+    return list(dict.fromkeys(paths))
+
+
+def _truncate_text(text: str, limit: int, label: str) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    truncated = encoded[:limit].decode("utf-8", errors="ignore")
+    return f"{truncated}\n[AHOY diff truncated: {label} exceeded {limit} bytes]\n"
+
+
+def _untracked_file_diff(project_root: Path, rel_path: str) -> str:
+    file_path = project_root / rel_path
+    header = f"diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel_path}\n"
+    try:
+        if file_path.is_symlink():
+            return header + f"[AHOY diff omitted: {rel_path} is a symlink]\n"
+        if file_path.stat().st_size > MAX_DIFF_FILE_BYTES:
+            return header + f"[AHOY diff truncated: {rel_path} exceeded {MAX_DIFF_FILE_BYTES} bytes]\n"
+        content = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return header + f"[AHOY diff omitted: {rel_path} is unreadable or binary]\n"
+    lines = content.splitlines()
+    body = [f"@@ -0,0 +1,{len(lines)} @@"]
+    body.extend(f"+{line}" for line in lines)
+    if content.endswith("\n"):
+        body.append("")
+    return header + "\n".join(body) + "\n"
+
+
+def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> str | None:
+    """Collect changed files and unified diff from git, treating it as source of truth.
+
+    Returns None when *project_root* is not a git worktree so older non-git unit
+    tests and ad-hoc callers can still use the gen_report fallback.
+    """
+    if not _is_git_worktree(project_root):
+        return None
+
+    status_proc = _run_git(
+        project_root,
+        ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    if status_proc.returncode != 0:
+        raise ValueError(f"Failed to inspect git status: {(status_proc.stderr or '').strip()[:200]}")
+    changes = _filter_source_changes(_parse_porcelain_status(status_proc.stdout))
+    if not changes:
+        raise ValueError("No git changes detected; evaluator requires git diff/status as source of truth.")
+
+    diff_base = "HEAD" if _has_git_head(project_root) else _empty_git_tree(project_root)
+    with tempfile.NamedTemporaryFile(prefix="ahoy-git-diff-", suffix=".diff", delete=False) as diff_file:
+        diff_path = Path(diff_file.name)
+    try:
+        tracked_diff_proc = _run_git(
+            project_root,
+            [
+                "diff",
+                f"--output={diff_path}",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                "--find-copies",
+                "--binary",
+                diff_base,
+                "--",
+                ".",
+                ":(exclude).claude/harness",
+                ":(exclude).claude/harness/**",
+            ],
+        )
+        if tracked_diff_proc.returncode != 0:
+            raise ValueError(f"Failed to collect git diff: {(tracked_diff_proc.stderr or '').strip()[:200]}")
+        tracked_diff_over_limit = diff_path.stat().st_size > MAX_DIFF_BYTES
+        tracked_diff_bytes = diff_path.read_bytes()[: MAX_DIFF_BYTES + 1]
+    finally:
+        diff_path.unlink(missing_ok=True)
+    tracked_diff_text = tracked_diff_bytes.decode("utf-8", errors="replace")
+    if tracked_diff_over_limit:
+        tracked_diff_text = _truncate_text(tracked_diff_text, MAX_DIFF_BYTES, "tracked git diff")
+
+    parts: list[str] = ["## Git Diff Source of Truth"]
+    paths = _changed_paths(changes)
+    if len(paths) > MAX_CHANGED_FILES:
+        shown_paths = paths[:MAX_CHANGED_FILES]
+        omitted = len(paths) - MAX_CHANGED_FILES
+    else:
+        shown_paths = paths
+        omitted = 0
+    parts.append("### Changed Files")
+    parts.extend(f"- `{path}`" for path in shown_paths)
+    if omitted:
+        parts.append(f"- [AHOY file list truncated: {omitted} additional changed path(s) omitted]")
+
+    reported = set(reported_files)
+    actual = {change["path"] for change in changes}
+    accepted_report_paths = actual | {change["old_path"] for change in changes if change.get("old_path")}
+    missing_from_report = sorted(actual - reported)
+    report_only = sorted(reported - accepted_report_paths)
+    if missing_from_report or report_only:
+        parts.append("\n## Generator Report / Git Mismatch")
+        if missing_from_report:
+            parts.append("Changed in git but missing from gen_report.md:")
+            parts.extend(f"- `{path}`" for path in missing_from_report[:MAX_CHANGED_FILES])
+        if report_only:
+            parts.append("Listed in gen_report.md but not changed in git:")
+            parts.extend(f"- `{path}`" for path in report_only[:MAX_CHANGED_FILES])
+
+    diff_parts = [tracked_diff_text]
+    diff_was_truncated = False
+    for change in changes:
+        if change["type"] == "untracked":
+            diff_parts.append(_untracked_file_diff(project_root, change["path"]))
+            combined_so_far = "\n".join(part for part in diff_parts if part)
+            if len(combined_so_far.encode("utf-8")) > MAX_DIFF_BYTES:
+                diff_was_truncated = True
+                break
+    combined_diff = "\n".join(part for part in diff_parts if part)
+    if diff_was_truncated:
+        diff_text = _truncate_text(combined_diff, MAX_DIFF_BYTES, "combined git diff")
+    else:
+        diff_text = combined_diff
+    parts.append("\n### Unified Diff")
+    parts.append(f"```diff\n{diff_text}\n```")
+    return "\n".join(parts)
+
+
 def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
-    """Read file list from gen_report.md and collect code snippets."""
+    """Collect evaluator context, preferring git diff over gen_report file lists."""
     gen_report_path = sprint_dir / "gen_report.md"
     if not gen_report_path.exists():
         raise ValueError("gen_report.md not found")
@@ -444,6 +668,10 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
     content = gen_report_path.read_text(encoding="utf-8")
     snippets = []
     files = resolve_reported_files(content)
+
+    git_context = collect_git_diff_context(project_root, files)
+    if git_context is not None:
+        return git_context
 
     if not files:
         raise ValueError(
@@ -453,7 +681,7 @@ def collect_code_snippets(sprint_dir: Path, project_root: Path) -> str:
 
     for file_rel in files[:20]:  # max 20 files
         file_path = project_root / file_rel
-        if file_path.exists() and file_path.stat().st_size < 50_000:
+        if file_path.exists() and file_path.stat().st_size < MAX_DIFF_FILE_BYTES:
             try:
                 code = file_path.read_text(encoding="utf-8")
                 snippets.append(f"### {file_rel}\n```\n{code}\n```")

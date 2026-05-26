@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -116,6 +118,323 @@ def test_collect_code_snippets_reads_declared_files(tmp_path: Path):
 
     assert "### scripts/example.py" in snippets
     assert "print('hello')" in snippets
+
+
+def test_collect_code_snippets_uses_git_diff_even_when_gen_report_omits_changed_file(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md").write_text(
+        "### Files Modified\n- `scripts/reported.py`\n",
+        encoding="utf-8",
+    )
+    project_root = tmp_path / "project"
+    (project_root / "scripts").mkdir(parents=True)
+    reported = project_root / "scripts" / "reported.py"
+    omitted = project_root / "scripts" / "omitted.py"
+    reported.write_text("print('old')\n", encoding="utf-8")
+    omitted.write_text("print('missing from report')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "scripts/reported.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    reported.write_text("print('new')\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "## Git Diff Source of Truth" in snippets
+    assert "scripts/reported.py" in snippets
+    assert "scripts/omitted.py" in snippets
+    assert "print('missing from report')" in snippets
+    assert "## Generator Report / Git Mismatch" in snippets
+    assert "Changed in git but missing from gen_report.md" in snippets
+
+
+def test_collect_code_snippets_marks_deleted_renamed_and_truncated_untracked_files(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `keep.txt`\n", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "deleted.txt").write_text("gone\n", encoding="utf-8")
+    (project_root / "old_name.txt").write_text("renamed\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "."], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    (project_root / "deleted.txt").unlink()
+    (project_root / "old_name.txt").rename(project_root / "new_name.txt")
+    (project_root / "large_untracked.txt").write_text("x" * (eval_dispatch.MAX_DIFF_FILE_BYTES + 1), encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "deleted.txt" in snippets
+    assert "old_name.txt" in snippets
+    assert "new_name.txt" in snippets
+    assert "large_untracked.txt" in snippets
+    assert "[AHOY diff truncated" in snippets
+
+
+def test_collect_code_snippets_excludes_harness_artifacts_from_git_truth(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    source_file = project_root / "src" / "feature.py"
+    sprint_dir.mkdir(parents=True)
+    source_file.parent.mkdir(parents=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/feature.py`\n", encoding="utf-8")
+    source_file.write_text("print('old')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "src/feature.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    source_file.write_text("print('new')\n", encoding="utf-8")
+    (sprint_dir / "issues.json").write_text("[]\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "src/feature.py" in snippets
+    assert ".claude/harness" not in snippets
+    assert "gen_report.md" not in snippets
+    assert "issues.json" not in snippets
+
+
+def test_collect_code_snippets_uses_git_truth_in_unborn_head_repo(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/feature.py`\n", encoding="utf-8")
+    source_file = project_root / "src" / "feature.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("print('new repo')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "## Git Diff Source of Truth" in snippets
+    assert "src/feature.py" in snippets
+    assert "print('new repo')" in snippets
+    assert "fatal: ambiguous argument 'HEAD'" not in snippets
+
+
+def test_empty_git_tree_falls_back_to_sha1_when_hash_object_fails(monkeypatch, tmp_path: Path):
+    def fail_run_git(project_root: Path, args: list[str]):
+        return eval_dispatch.subprocess.CompletedProcess(args, 1, "", "hash-object failed")
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fail_run_git)
+
+    assert eval_dispatch._empty_git_tree(tmp_path) == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def test_parse_porcelain_status_decodes_c_quoted_paths():
+    changes = eval_dispatch._parse_porcelain_status('?? "docs/path with spaces.md"\n M "src/quote\\"file.py"\n?? "caf\\303\\251.txt"\n')
+
+    assert changes[0]["path"] == "docs/path with spaces.md"
+    assert changes[1]["path"] == 'src/quote"file.py'
+    assert changes[2]["path"] == "café.txt"
+
+
+def test_untracked_file_diff_does_not_follow_symlink_targets(tmp_path: Path):
+    target = tmp_path / "outside-secret.txt"
+    target.write_text("do not leak\n", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    link = project_root / "linked.txt"
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available on this platform")
+
+    diff = eval_dispatch._untracked_file_diff(project_root, "linked.txt")
+
+    assert "do not leak" not in diff
+    assert "[AHOY diff omitted: linked.txt is a symlink]" in diff
+
+
+def test_filter_source_changes_preserves_source_deletion_when_renamed_into_harness():
+    filtered = eval_dispatch._filter_source_changes(
+        [
+            {
+                "status": "R ",
+                "type": "renamed",
+                "old_path": "src/feature.py",
+                "path": ".claude/harness/sprints/sprint-001/feature.py",
+            }
+        ]
+    )
+
+    assert filtered == [{"status": " D", "type": "deleted", "old_path": "", "path": "src/feature.py"}]
+
+
+def test_report_mismatch_ignores_rename_old_path_when_new_path_is_reported(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    (project_root / "src").mkdir()
+    old_path = project_root / "src" / "old.py"
+    old_path.write_text("print('same')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "src/old.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "mv", "src/old.py", "src/new.py"], cwd=project_root, check=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/old.py`\n- `src/new.py`\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "src/old.py" in snippets
+    assert "Listed in gen_report.md but not changed in git:\n- `src/old.py`" not in snippets
+    assert "Changed in git but missing from gen_report.md:\n- `src/old.py`" not in snippets
+
+
+def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_reading(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            assert "--no-ext-diff" in args
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            assert output_args, f"git diff should write to a file before Python reads/truncates output: {args}"
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", tempfile.NamedTemporaryFile)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_collect_git_diff_context_marks_tracked_diff_truncation(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text(
+                "diff --git a/tracked.py b/tracked.py\n" + ("+x\n" * 100),
+                encoding="utf-8",
+            )
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(eval_dispatch, "MAX_DIFF_BYTES", 80)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "[AHOY diff truncated: tracked git diff exceeded 80 bytes]" in context
+
+
+def test_collect_git_diff_context_disables_textconv_for_tracked_diff(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            assert "--no-textconv" in args
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_collect_git_diff_context_disables_fsmonitor_for_status(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if "status" in args:
+            assert args[:3] == ["-c", "core.fsmonitor=false", "status"]
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_empty_git_tree_uses_repository_object_format(tmp_path: Path):
+    init = eval_dispatch.subprocess.run(
+        ["git", "init", "--object-format=sha256"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    if init.returncode != 0:
+        pytest.skip("git does not support sha256 repositories")
+
+    expected = eval_dispatch.subprocess.run(
+        ["git", "hash-object", "-t", "tree", "/dev/null"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    empty_tree = eval_dispatch._empty_git_tree(tmp_path)
+
+    assert len(empty_tree) == 64
+    assert empty_tree == expected
+
+
+def test_collect_git_diff_context_stops_untracked_diff_collection_at_byte_limit(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "?? a.py\n?? b.py\n?? c.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    def fake_untracked_file_diff(project_root: Path, rel_path: str) -> str:
+        calls.append(rel_path)
+        return f"diff --git a/{rel_path} b/{rel_path}\n" + ("x" * 80)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(eval_dispatch, "_untracked_file_diff", fake_untracked_file_diff)
+    monkeypatch.setattr(eval_dispatch, "MAX_DIFF_BYTES", 120)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, [])
+
+    assert calls == ["a.py", "b.py"]
+    assert "[AHOY diff truncated: combined git diff exceeded 120 bytes]" in context
+    assert "c.py" not in calls
 
 
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):
