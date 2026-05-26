@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -746,7 +747,7 @@ def write_result(sprint_dir: Path, result: dict) -> None:
     print(f"[eval_dispatch] Result saved: {issues_path}", file=sys.stderr)
 
 
-_STATE_EXCLUDE_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+_STATE_EXCLUDE_DIRS = {".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 
 def _file_digest(path: Path) -> str:
@@ -757,21 +758,52 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _capture_file_state(root: Path) -> dict[str, tuple[int, int, str]]:
-    """Capture project files, including git-ignored files, excluding tool internals."""
-    files: dict[str, tuple[int, int, str]] = {}
+def _capture_file_state(root: Path) -> dict[str, tuple[str, int, int, str]]:
+    """Capture project files, including git metadata and symlinks, excluding tool caches."""
+    files: dict[str, tuple[str, int, int, str]] = {}
     for current, dirs, filenames in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in _STATE_EXCLUDE_DIRS]
         current_path = Path(current)
+        traversable_dirs: list[str] = []
+        for dirname in dirs:
+            if dirname in _STATE_EXCLUDE_DIRS:
+                continue
+            dir_path = current_path / dirname
+            if dir_path.is_symlink():
+                try:
+                    stat = dir_path.lstat()
+                    target = os.readlink(dir_path)
+                except OSError:
+                    continue
+                rel = dir_path.relative_to(root).as_posix()
+                files[rel] = ("symlink", stat.st_size, stat.st_mtime_ns, target)
+                continue
+            traversable_dirs.append(dirname)
+        dirs[:] = traversable_dirs
         for filename in filenames:
             path = current_path / filename
             try:
-                stat = path.stat()
+                stat = path.lstat()
+                if path.is_symlink():
+                    files[path.relative_to(root).as_posix()] = (
+                        "symlink",
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        os.readlink(path),
+                    )
+                    continue
+                if not stat_module.S_ISREG(stat.st_mode):
+                    files[path.relative_to(root).as_posix()] = (
+                        "special",
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        str(stat.st_mode),
+                    )
+                    continue
                 fingerprint = _file_digest(path)
             except OSError:
                 continue
             rel = path.relative_to(root).as_posix()
-            files[rel] = (stat.st_size, stat.st_mtime_ns, fingerprint)
+            files[rel] = ("file", stat.st_size, stat.st_mtime_ns, fingerprint)
     return files
 
 
@@ -781,7 +813,7 @@ def _capture_project_state(project_root: Path) -> dict:
     if not root.exists():
         return {"kind": "missing", "root": str(root)}
 
-    files = _capture_file_state(root)
+    git_status: str | None = None
     try:
         inside = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -801,15 +833,33 @@ def _capture_project_state(project_root: Path) -> dict:
                 timeout=10,
             )
             if status.returncode == 0:
-                return {"kind": "git", "root": str(root), "status": status.stdout, "files": files}
+                git_status = status.stdout
     except (OSError, subprocess.TimeoutExpired):
         pass
 
-    return {"kind": "files", "root": str(root), "files": files}
+    files = _capture_file_state(root)
+    return {"kind": "workspace", "root": str(root), "git_status": git_status, "files": files}
 
 
 def _project_state_changed(before: dict, after: dict) -> bool:
+    if before.get("kind") == after.get("kind") == "workspace":
+        before_files = before.get("files")
+        after_files = after.get("files")
+        if before_files != after_files:
+            return True
+        before_status = before.get("git_status")
+        after_status = after.get("git_status")
+        if before_status is None or after_status is None:
+            return False
+        return before_status != after_status
     return before != after
+
+
+def _strict_config_bool(config: dict, key: str, default: bool = False) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be a JSON boolean, got {type(value).__name__}")
 
 
 def _workspace_mutation_error(sprint_dir: Path, models: list[str]) -> dict:
@@ -1592,7 +1642,13 @@ def main() -> int:
     sprint_dir = Path(args.sprint_dir)
     project_root = Path(args.project_root)
     models = [m.strip() for m in args.models.split(",")]
-    allow_dangerous = bool(config.get("allow_dangerous_evaluator_execution", False))
+    try:
+        allow_dangerous = _strict_config_bool(config, "allow_dangerous_evaluator_execution")
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        result = _error_result(sprint_dir, models, str(exc))
+        write_result(sprint_dir, result)
+        return 1
 
     # Resolve harness_state.json path for cost tracking
     harness_state_path = project_root / ".claude" / "harness" / "harness_state.json"

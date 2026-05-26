@@ -852,6 +852,69 @@ def test_project_state_detects_git_ignored_content_change_even_if_stat_metadata_
     assert eval_dispatch._project_state_changed(before, after)
 
 
+def test_project_state_detects_git_metadata_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, stdout=eval_dispatch.subprocess.PIPE)
+
+    before = eval_dispatch._capture_project_state(project_root)
+    (project_root / ".git" / "ahoy-mutation-marker").write_text("mutated", encoding="utf-8")
+    after = eval_dispatch._capture_project_state(project_root)
+
+    assert eval_dispatch._project_state_changed(before, after)
+
+
+def test_project_state_skips_hashing_special_files(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    fifo_path = project_root / "events.pipe"
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("fifo files are not available on this platform")
+    os.mkfifo(fifo_path)
+
+    state = eval_dispatch._capture_project_state(project_root)
+
+    assert state["files"]["events.pipe"][0] == "special"
+
+
+def test_project_state_detects_symlink_target_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    target_a = tmp_path / "target-a.txt"
+    target_b = tmp_path / "target-b.txt"
+    target_a.write_text("same content\n", encoding="utf-8")
+    target_b.write_text("same content\n", encoding="utf-8")
+    link = project_root / "linked.txt"
+    try:
+        os.symlink(target_a, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available on this platform")
+
+    before = eval_dispatch._capture_project_state(project_root)
+    link.unlink()
+    os.symlink(target_b, link)
+    after = eval_dispatch._capture_project_state(project_root)
+
+    assert eval_dispatch._project_state_changed(before, after)
+
+
+def test_project_state_remains_stable_when_git_status_becomes_unavailable():
+    before = {"kind": "workspace", "root": "/repo", "git_status": "", "files": {"a.txt": ("file", 1, 2, "abc")}}
+    after = {"kind": "workspace", "root": "/repo", "git_status": None, "files": {"a.txt": ("file", 1, 2, "abc")}}
+
+    assert not eval_dispatch._project_state_changed(before, after)
+
+
+def test_strict_config_bool_rejects_string_opt_in():
+    assert eval_dispatch._strict_config_bool({"allow_dangerous_evaluator_execution": True}, "allow_dangerous_evaluator_execution") is True
+    assert eval_dispatch._strict_config_bool({}, "allow_dangerous_evaluator_execution") is False
+    with pytest.raises(ValueError):
+        eval_dispatch._strict_config_bool(
+            {"allow_dangerous_evaluator_execution": "false"},
+            "allow_dangerous_evaluator_execution",
+        )
+
+
 def test_main_fails_if_evaluator_mutates_project_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sprint_dir = tmp_path / "sprint-001"
     project_root = tmp_path / "project"
