@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -284,6 +285,29 @@ def test_report_mismatch_ignores_rename_old_path_when_new_path_is_reported(tmp_p
 
     assert "src/old.py" in snippets
     assert "Changed in git but missing from gen_report.md:\n- `src/old.py`" not in snippets
+
+
+def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_reading(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if args and args[0] == "diff":
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            assert output_args, f"git diff should write to a file before Python reads/truncates output: {args}"
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", tempfile.NamedTemporaryFile)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
 
 
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):

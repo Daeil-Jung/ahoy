@@ -25,6 +25,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -572,22 +573,30 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
         raise ValueError("No git changes detected; evaluator requires git diff/status as source of truth.")
 
     diff_base = "HEAD" if _has_git_head(project_root) else _empty_git_tree(project_root)
-    tracked_diff_proc = _run_git(
-        project_root,
-        [
-            "diff",
-            "--find-renames",
-            "--find-copies",
-            "--binary",
-            diff_base,
-            "--",
-            ".",
-            ":(exclude).claude/harness",
-            ":(exclude).claude/harness/**",
-        ],
-    )
-    if tracked_diff_proc.returncode != 0:
-        raise ValueError(f"Failed to collect git diff: {(tracked_diff_proc.stderr or '').strip()[:200]}")
+    with tempfile.NamedTemporaryFile(prefix="ahoy-git-diff-", suffix=".diff", delete=False) as diff_file:
+        diff_path = Path(diff_file.name)
+    try:
+        tracked_diff_proc = _run_git(
+            project_root,
+            [
+                "diff",
+                f"--output={diff_path}",
+                "--find-renames",
+                "--find-copies",
+                "--binary",
+                diff_base,
+                "--",
+                ".",
+                ":(exclude).claude/harness",
+                ":(exclude).claude/harness/**",
+            ],
+        )
+        if tracked_diff_proc.returncode != 0:
+            raise ValueError(f"Failed to collect git diff: {(tracked_diff_proc.stderr or '').strip()[:200]}")
+        tracked_diff_bytes = diff_path.read_bytes()[: MAX_DIFF_BYTES + 1]
+    finally:
+        diff_path.unlink(missing_ok=True)
+    tracked_diff_text = tracked_diff_bytes.decode("utf-8", errors="replace")
 
     parts: list[str] = ["## Git Diff Source of Truth"]
     paths = _changed_paths(changes)
@@ -615,7 +624,7 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
             parts.append("Listed in gen_report.md but not changed in git:")
             parts.extend(f"- `{path}`" for path in report_only[:MAX_CHANGED_FILES])
 
-    diff_parts = [tracked_diff_proc.stdout]
+    diff_parts = [tracked_diff_text]
     for change in changes:
         if change["type"] == "untracked":
             diff_parts.append(_untracked_file_diff(project_root, change["path"]))
