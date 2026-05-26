@@ -228,10 +228,11 @@ def test_empty_git_tree_is_platform_independent_without_filesystem_sentinel(monk
 
 
 def test_parse_porcelain_status_decodes_c_quoted_paths():
-    changes = eval_dispatch._parse_porcelain_status('?? "docs/path with spaces.md"\n M "src/quote\\"file.py"\n')
+    changes = eval_dispatch._parse_porcelain_status('?? "docs/path with spaces.md"\n M "src/quote\\"file.py"\n?? "caf\\303\\251.txt"\n')
 
     assert changes[0]["path"] == "docs/path with spaces.md"
     assert changes[1]["path"] == 'src/quote"file.py'
+    assert changes[2]["path"] == "café.txt"
 
 
 def test_untracked_file_diff_does_not_follow_symlink_targets(tmp_path: Path):
@@ -279,11 +280,12 @@ def test_report_mismatch_ignores_rename_old_path_when_new_path_is_reported(tmp_p
     eval_dispatch.subprocess.run(["git", "add", "src/old.py"], cwd=project_root, check=True)
     eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
     eval_dispatch.subprocess.run(["git", "mv", "src/old.py", "src/new.py"], cwd=project_root, check=True)
-    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/new.py`\n", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/old.py`\n- `src/new.py`\n", encoding="utf-8")
 
     snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
 
     assert "src/old.py" in snippets
+    assert "Listed in gen_report.md but not changed in git:\n- `src/old.py`" not in snippets
     assert "Changed in git but missing from gen_report.md:\n- `src/old.py`" not in snippets
 
 
@@ -296,6 +298,7 @@ def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_read
         if args == ["rev-parse", "--verify", "HEAD"]:
             return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
         if args and args[0] == "diff":
+            assert "--no-ext-diff" in args
             output_args = [arg for arg in args if arg.startswith("--output=")]
             assert output_args, f"git diff should write to a file before Python reads/truncates output: {args}"
             Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")

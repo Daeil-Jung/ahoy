@@ -448,6 +448,7 @@ def _run_git(project_root: Path, args: list[str]) -> subprocess.CompletedProcess
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -490,7 +491,10 @@ def _decode_porcelain_path(path: str) -> str:
         except (SyntaxError, ValueError):
             return path
         if isinstance(decoded, str):
-            return decoded
+            try:
+                return decoded.encode("latin-1").decode("utf-8")
+            except UnicodeError:
+                return decoded
     return path
 
 
@@ -581,6 +585,7 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
             [
                 "diff",
                 f"--output={diff_path}",
+                "--no-ext-diff",
                 "--find-renames",
                 "--find-copies",
                 "--binary",
@@ -613,8 +618,9 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
 
     reported = set(reported_files)
     actual = {change["path"] for change in changes}
+    accepted_report_paths = actual | {change["old_path"] for change in changes if change.get("old_path")}
     missing_from_report = sorted(actual - reported)
-    report_only = sorted(reported - actual)
+    report_only = sorted(reported - accepted_report_paths)
     if missing_from_report or report_only:
         parts.append("\n## Generator Report / Git Mismatch")
         if missing_from_report:
