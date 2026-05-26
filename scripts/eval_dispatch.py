@@ -8,7 +8,7 @@ Usage:
     python eval_dispatch.py <sprint_dir> [--models codex,gemini] [--project-root .]
 
 Supported models:
-    codex   - OpenAI Codex CLI (codex exec --yolo --ephemeral)
+    codex   - OpenAI Codex CLI (codex exec --ephemeral; dangerous sandbox bypass is opt-in only)
     gemini  - Google Gemini CLI (gemini -p)
     claude  - Anthropic Claude CLI (claude -p) — separate process, so context is isolated from Generator
 """
@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import ast
 import concurrent.futures
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -271,21 +273,33 @@ def _build_cmd_string(cmd: list[str]) -> str:
     return shlex.join(cmd)
 
 
-def call_model(model: str, prompt: str, timeout: int = 600) -> str:
-    """Call an external model CLI using stdin for the prompt."""
+def call_model(
+    model: str,
+    prompt: str,
+    timeout: int = 600,
+    workspace: Path | None = None,
+    allow_dangerous: bool = False,
+) -> str:
+    """Call an external model CLI using stdin for the prompt.
+
+    Model CLIs run from ``workspace`` when provided so evaluator processes do not
+    get the user's project root as their working directory by default.
+    """
     output_file: str | None = None
+    cwd = Path(workspace) if workspace is not None else Path.cwd()
 
     try:
 
         if model == "codex":
-            # codex exec: --dangerously-bypass-approvals-and-sandbox (auto-approve),
+            # Keep the dangerous bypass flag opt-in only. Default evaluator runs
+            # must not silently receive write-capable sandbox bypass privileges.
             # --ephemeral (no session saved), -o/--output-last-message: save final response to file
             # - : read prompt from stdin
-            output_file = str(Path.cwd() / f".ahoy-codex-output-{os.getpid()}.txt")
-            cmd = [
-                "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--ephemeral",
-                "--output-last-message", output_file, "-",
-            ]
+            output_file = str(cwd / f".ahoy-codex-output-{os.getpid()}.txt")
+            cmd = ["codex", "exec", "--ephemeral"]
+            if allow_dangerous:
+                cmd.append("--dangerously-bypass-approvals-and-sandbox")
+            cmd.extend(["--output-last-message", output_file, "-"])
             stdin_data = prompt
         elif model == "gemini":
             # gemini: -p/--prompt (non-interactive headless mode)
@@ -312,6 +326,7 @@ def call_model(model: str, prompt: str, timeout: int = 600) -> str:
             timeout=timeout,
             encoding="utf-8",
             shell=True,
+            cwd=str(cwd),
         )
 
         print(f"[eval_dispatch] {model} exit code: {result.returncode}", file=sys.stderr)
@@ -729,6 +744,90 @@ def write_result(sprint_dir: Path, result: dict) -> None:
     issues_path = sprint_dir / "issues.json"
     issues_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[eval_dispatch] Result saved: {issues_path}", file=sys.stderr)
+
+
+_STATE_EXCLUDE_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _capture_file_state(root: Path) -> dict[str, tuple[int, int, str]]:
+    """Capture project files, including git-ignored files, excluding tool internals."""
+    files: dict[str, tuple[int, int, str]] = {}
+    for current, dirs, filenames in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _STATE_EXCLUDE_DIRS]
+        current_path = Path(current)
+        for filename in filenames:
+            path = current_path / filename
+            try:
+                stat = path.stat()
+                fingerprint = _file_digest(path)
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            files[rel] = (stat.st_size, stat.st_mtime_ns, fingerprint)
+    return files
+
+
+def _capture_project_state(project_root: Path) -> dict:
+    """Capture enough state to detect evaluator mutations of project_root."""
+    root = project_root.resolve()
+    if not root.exists():
+        return {"kind": "missing", "root": str(root)}
+
+    files = _capture_file_state(root)
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        if inside.returncode == 0 and inside.stdout.strip() == "true":
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            if status.returncode == 0:
+                return {"kind": "git", "root": str(root), "status": status.stdout, "files": files}
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return {"kind": "files", "root": str(root), "files": files}
+
+
+def _project_state_changed(before: dict, after: dict) -> bool:
+    return before != after
+
+
+def _workspace_mutation_error(sprint_dir: Path, models: list[str]) -> dict:
+    result = _error_result(
+        sprint_dir,
+        models,
+        "Evaluator modified project workspace; default evaluator execution must not mutate project_root.",
+    )
+    result["issues"] = [
+        {
+            "id": "EVAL-WORKSPACE-MUTATION",
+            "severity": "blocker",
+            "category": "security",
+            "description": "An evaluator subprocess changed files under project_root during evaluation.",
+            "suggested_fix": "Run evaluators in an isolated workspace or remove write-capable evaluator flags.",
+        }
+    ]
+    return result
 
 
 def _merge_criteria_results(
@@ -1493,6 +1592,7 @@ def main() -> int:
     sprint_dir = Path(args.sprint_dir)
     project_root = Path(args.project_root)
     models = [m.strip() for m in args.models.split(",")]
+    allow_dangerous = bool(config.get("allow_dangerous_evaluator_execution", False))
 
     # Resolve harness_state.json path for cost tracking
     harness_state_path = project_root / ".claude" / "harness" / "harness_state.json"
@@ -1551,13 +1651,29 @@ def main() -> int:
     # Call each model in parallel
     print(f"[eval_dispatch] Evaluation models: {models} (parallel calls)", file=sys.stderr)
     verdicts: dict[str, dict] = {}
+    project_state_before = _capture_project_state(project_root)
 
     raw_responses: dict[str, str] = {}
+
+    def _call_model(model: str, eval_prompt: str, workspace: Path) -> str:
+        """Call current call_model implementation, including isolated workspace when supported."""
+        signature = inspect.signature(call_model)
+        supports_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        if supports_kwargs or "workspace" in signature.parameters:
+            return call_model(
+                model,
+                eval_prompt,
+                timeout=args.timeout,
+                workspace=workspace,
+                allow_dangerous=allow_dangerous,
+            )
+        return call_model(model, eval_prompt, timeout=args.timeout)
 
     def _call_and_parse(model: str, eval_prompt: str) -> tuple[str, dict, str]:
         """Call a single model and parse JSON response.  Returns (model, parsed, raw)."""
         print(f"[eval_dispatch] Calling {model}...", file=sys.stderr)
-        raw = call_model(model, eval_prompt, timeout=args.timeout)
+        with tempfile.TemporaryDirectory(prefix=f"ahoy-eval-{model}-") as tmp_workspace:
+            raw = _call_model(model, eval_prompt, Path(tmp_workspace))
         parsed = extract_json(raw)
         if parsed:
             parsed = validate_objections(parsed, model)
@@ -1583,6 +1699,13 @@ def main() -> int:
             model_name, result, raw = future.result()
             verdicts[model_name] = result
             raw_responses[model_name] = raw
+
+    project_state_after_round1 = _capture_project_state(project_root)
+    if _project_state_changed(project_state_before, project_state_after_round1):
+        result = _workspace_mutation_error(sprint_dir, models)
+        write_result(sprint_dir, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
 
     # --- Cost tracking helper ---
     def _calc_round_tokens(
@@ -1646,6 +1769,7 @@ def main() -> int:
             round2_prompt = build_round2_prompt(prompt, round1_verdicts)
             round2_verdicts = {}
             round2_raw: dict[str, str] = {}
+            project_state_before_round2 = _capture_project_state(project_root)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
                 futures = {executor.submit(_call_and_parse, m, round2_prompt): m for m in models}
@@ -1653,6 +1777,13 @@ def main() -> int:
                     model_name, result, _raw = future.result()
                     round2_verdicts[model_name] = result
                     round2_raw[model_name] = _raw
+
+            project_state_after_round2 = _capture_project_state(project_root)
+            if _project_state_changed(project_state_before_round2, project_state_after_round2):
+                result = _workspace_mutation_error(sprint_dir, models)
+                write_result(sprint_dir, result)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 1
 
             round2_tokens = _calc_round_tokens(round2_raw, round2_verdicts, len(round2_prompt))
 

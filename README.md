@@ -186,6 +186,8 @@ python ${CLAUDE_PLUGIN_ROOT}/scripts/eval_dispatch.py \
 
 Models are called **in parallel** via `ThreadPoolExecutor`.
 
+Evaluator CLIs run from per-model temporary workspaces by default, not from the user's project root. `eval_dispatch.py` also snapshots `project_root` before and after evaluator execution; if any evaluator writes, removes, or changes files under the repo, the run fails with `EVAL-WORKSPACE-MUTATION` and only the parent Ahoy process writes `issues.json`. Codex's sandbox bypass flag is disabled by default; set `allow_dangerous_evaluator_execution: true` in `ahoy_config.json` only for a trusted local debug session, never for normal evaluation.
+
 ### 4. Rework or Advance
 
 - **pass** → advance to next sprint

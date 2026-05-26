@@ -676,6 +676,50 @@ def test_call_model_returns_output_file_contents_for_codex(monkeypatch: pytest.M
     assert eval_dispatch.call_model("codex", "prompt") == '{"verdict": "pass"}'
 
 
+def test_call_model_runs_codex_in_isolated_workspace_without_dangerous_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    calls: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append({"cmd": cmd, **kwargs})
+        output_path = tmp_path / ".ahoy-codex-output-1234.txt"
+        output_path.write_text('{"verdict": "pass"}', encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(eval_dispatch.os, "getpid", lambda: 1234)
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", fake_run)
+
+    assert eval_dispatch.call_model("codex", "prompt", workspace=tmp_path) == '{"verdict": "pass"}'
+
+    assert calls[0]["cwd"] == str(tmp_path)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in calls[0]["cmd"]
+
+
+def test_call_model_requires_explicit_opt_in_for_dangerous_codex_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    calls: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+            stdout = '{"verdict": "pass"}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(eval_dispatch.subprocess, "run", fake_run)
+
+    eval_dispatch.call_model("codex", "prompt", workspace=tmp_path, allow_dangerous=True)
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in calls[0]
+
+
 def test_call_model_returns_error_json_on_cli_failure(monkeypatch: pytest.MonkeyPatch):
     class Result:
         returncode = 1
@@ -738,8 +782,13 @@ def test_main_writes_consensus_result(monkeypatch: pytest.MonkeyPatch, tmp_path:
     file_path.parent.mkdir(parents=True)
     file_path.write_text("print('ok')", encoding="utf-8")
 
-    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+    workspaces: list[Path] = []
+
+    def fake_call_model(model: str, prompt: str, timeout: int = 600, **kwargs) -> str:
         assert "Generator Report" in prompt
+        workspace = kwargs.get("workspace")
+        assert workspace is not None
+        workspaces.append(Path(workspace))
         return json.dumps(
             {
                 "verdict": "pass",
@@ -769,6 +818,66 @@ def test_main_writes_consensus_result(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert payload["verdict"] == "pass"
     assert payload["status_action"] == "passed"
     assert sorted(payload["models_valid"]) == ["claude", "codex"]
+    assert workspaces
+    assert all(project_root not in [workspace, *workspace.parents] for workspace in workspaces)
+
+
+def test_project_state_detects_git_ignored_file_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, stdout=eval_dispatch.subprocess.PIPE)
+    (project_root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+
+    before = eval_dispatch._capture_project_state(project_root)
+    (project_root / "ignored.txt").write_text("mutated", encoding="utf-8")
+    after = eval_dispatch._capture_project_state(project_root)
+
+    assert eval_dispatch._project_state_changed(before, after)
+
+
+def test_project_state_detects_git_ignored_content_change_even_if_stat_metadata_is_preserved(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, stdout=eval_dispatch.subprocess.PIPE)
+    (project_root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    ignored_path = project_root / "ignored.txt"
+    ignored_path.write_text("original", encoding="utf-8")
+    original_stat = ignored_path.stat()
+
+    before = eval_dispatch._capture_project_state(project_root)
+    ignored_path.write_text("mutated!", encoding="utf-8")
+    eval_dispatch.os.utime(ignored_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    after = eval_dispatch._capture_project_state(project_root)
+
+    assert eval_dispatch._project_state_changed(before, after)
+
+
+def test_main_fails_if_evaluator_mutates_project_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    project_root = tmp_path / "project"
+    sprint_dir.mkdir()
+    (sprint_dir / "contract.md").write_text("AC-001", encoding="utf-8")
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `scripts/example.py`\n", encoding="utf-8")
+    file_path = project_root / "scripts" / "example.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("print('ok')", encoding="utf-8")
+
+    def mutating_call_model(model: str, prompt: str, timeout: int = 600, **kwargs) -> str:
+        (project_root / "evaluator-owned.txt").write_text("mutated", encoding="utf-8")
+        return json.dumps({"verdict": "pass", "issues": [], "passed_criteria": ["AC-001"], "failed_criteria": []})
+
+    monkeypatch.setattr(eval_dispatch, "call_model", mutating_call_model)
+    monkeypatch.setattr(
+        eval_dispatch.sys,
+        "argv",
+        ["eval_dispatch.py", str(sprint_dir), "--models", "codex,claude", "--project-root", str(project_root)],
+    )
+
+    assert eval_dispatch.main() == 1
+    payload = json.loads((sprint_dir / "issues.json").read_text(encoding="utf-8"))
+    assert payload["verdict"] == "error"
+    assert payload["status_action"] == "error"
+    assert "Evaluator modified project workspace" in payload["error_reason"]
 
 
 def test_main_aborts_when_cost_limit_is_exceeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -808,7 +917,7 @@ def test_main_uses_round2_when_round1_has_conflict(monkeypatch: pytest.MonkeyPat
 
     calls: list[str] = []
 
-    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+    def fake_call_model(model: str, prompt: str, timeout: int = 600, **kwargs) -> str:
         calls.append(prompt)
         round_number = len(calls) // 2 + (1 if len(calls) % 2 else 0)
         if "Round 2" not in prompt:
@@ -1078,7 +1187,7 @@ def test_main_round2_skipped_when_cost_limit_exceeded(monkeypatch: pytest.Monkey
 
     call_count = {"total": 0}
 
-    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+    def fake_call_model(model: str, prompt: str, timeout: int = 600, **kwargs) -> str:
         call_count["total"] += 1
         # Round 1: conflict to trigger round 2 attempt
         verdict = "fail" if model == "codex" else "pass"
@@ -1128,7 +1237,7 @@ def test_main_round2_quorum_lost_falls_back_to_round1(monkeypatch: pytest.Monkey
 
     call_count = {"total": 0}
 
-    def fake_call_model(model: str, prompt: str, timeout: int = 600) -> str:
+    def fake_call_model(model: str, prompt: str, timeout: int = 600, **kwargs) -> str:
         call_count["total"] += 1
         if "Round 2" not in prompt:
             # Round 1: conflict
