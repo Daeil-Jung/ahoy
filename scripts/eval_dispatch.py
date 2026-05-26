@@ -454,6 +454,30 @@ def _is_git_worktree(project_root: Path) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
+def _has_git_head(project_root: Path) -> bool:
+    return _run_git(project_root, ["rev-parse", "--verify", "HEAD"]).returncode == 0
+
+
+def _empty_git_tree(project_root: Path) -> str:
+    proc = _run_git(project_root, ["hash-object", "-t", "tree", "/dev/null"])
+    if proc.returncode != 0:
+        raise ValueError(f"Failed to resolve empty git tree: {(proc.stderr or '').strip()[:200]}")
+    return proc.stdout.strip()
+
+
+def _is_harness_artifact_path(rel_path: str) -> bool:
+    return rel_path == ".claude/harness" or rel_path.startswith(".claude/harness/")
+
+
+def _filter_source_changes(changes: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        change
+        for change in changes
+        if not _is_harness_artifact_path(change["path"])
+        and not (change.get("old_path") and _is_harness_artifact_path(change["old_path"]))
+    ]
+
+
 def _parse_porcelain_status(status_output: str) -> list[dict[str, str]]:
     changes: list[dict[str, str]] = []
     for raw in status_output.splitlines():
@@ -524,11 +548,25 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
     status_proc = _run_git(project_root, ["status", "--porcelain=v1", "--untracked-files=all"])
     if status_proc.returncode != 0:
         raise ValueError(f"Failed to inspect git status: {(status_proc.stderr or '').strip()[:200]}")
-    changes = _parse_porcelain_status(status_proc.stdout)
+    changes = _filter_source_changes(_parse_porcelain_status(status_proc.stdout))
     if not changes:
         raise ValueError("No git changes detected; evaluator requires git diff/status as source of truth.")
 
-    tracked_diff_proc = _run_git(project_root, ["diff", "--find-renames", "--find-copies", "--binary", "HEAD"])
+    diff_base = "HEAD" if _has_git_head(project_root) else _empty_git_tree(project_root)
+    tracked_diff_proc = _run_git(
+        project_root,
+        [
+            "diff",
+            "--find-renames",
+            "--find-copies",
+            "--binary",
+            diff_base,
+            "--",
+            ".",
+            ":(exclude).claude/harness",
+            ":(exclude).claude/harness/**",
+        ],
+    )
     if tracked_diff_proc.returncode != 0:
         raise ValueError(f"Failed to collect git diff: {(tracked_diff_proc.stderr or '').strip()[:200]}")
 
