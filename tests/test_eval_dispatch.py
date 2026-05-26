@@ -118,6 +118,62 @@ def test_collect_code_snippets_reads_declared_files(tmp_path: Path):
     assert "print('hello')" in snippets
 
 
+def test_collect_code_snippets_uses_git_diff_even_when_gen_report_omits_changed_file(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md").write_text(
+        "### Files Modified\n- `scripts/reported.py`\n",
+        encoding="utf-8",
+    )
+    project_root = tmp_path / "project"
+    (project_root / "scripts").mkdir(parents=True)
+    reported = project_root / "scripts" / "reported.py"
+    omitted = project_root / "scripts" / "omitted.py"
+    reported.write_text("print('old')\n", encoding="utf-8")
+    omitted.write_text("print('missing from report')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "scripts/reported.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    reported.write_text("print('new')\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "## Git Diff Source of Truth" in snippets
+    assert "scripts/reported.py" in snippets
+    assert "scripts/omitted.py" in snippets
+    assert "print('missing from report')" in snippets
+    assert "## Generator Report / Git Mismatch" in snippets
+    assert "Changed in git but missing from gen_report.md" in snippets
+
+
+def test_collect_code_snippets_marks_deleted_renamed_and_truncated_untracked_files(tmp_path: Path):
+    sprint_dir = tmp_path / "sprint-001"
+    sprint_dir.mkdir()
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `keep.txt`\n", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "deleted.txt").write_text("gone\n", encoding="utf-8")
+    (project_root / "old_name.txt").write_text("renamed\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "."], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    (project_root / "deleted.txt").unlink()
+    (project_root / "old_name.txt").rename(project_root / "new_name.txt")
+    (project_root / "large_untracked.txt").write_text("x" * (eval_dispatch.MAX_DIFF_FILE_BYTES + 1), encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "deleted.txt" in snippets
+    assert "old_name.txt" in snippets
+    assert "new_name.txt" in snippets
+    assert "large_untracked.txt" in snippets
+    assert "[AHOY diff truncated" in snippets
+
+
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):
     sprint_dir = tmp_path / "sprint-001"
     sprint_dir.mkdir()
