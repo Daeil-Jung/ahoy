@@ -605,10 +605,13 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
         )
         if tracked_diff_proc.returncode != 0:
             raise ValueError(f"Failed to collect git diff: {(tracked_diff_proc.stderr or '').strip()[:200]}")
+        tracked_diff_over_limit = diff_path.stat().st_size > MAX_DIFF_BYTES
         tracked_diff_bytes = diff_path.read_bytes()[: MAX_DIFF_BYTES + 1]
     finally:
         diff_path.unlink(missing_ok=True)
     tracked_diff_text = tracked_diff_bytes.decode("utf-8", errors="replace")
+    if tracked_diff_over_limit:
+        tracked_diff_text = _truncate_text(tracked_diff_text, MAX_DIFF_BYTES, "tracked git diff")
 
     parts: list[str] = ["## Git Diff Source of Truth"]
     paths = _changed_paths(changes)

@@ -313,6 +313,31 @@ def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_read
     assert "diff --git a/tracked.py b/tracked.py" in context
 
 
+def test_collect_git_diff_context_marks_tracked_diff_truncation(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text(
+                "diff --git a/tracked.py b/tracked.py\n" + ("+x\n" * 100),
+                encoding="utf-8",
+            )
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(eval_dispatch, "MAX_DIFF_BYTES", 80)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "[AHOY diff truncated: tracked git diff exceeded 80 bytes]" in context
+
+
 def test_collect_git_diff_context_disables_textconv_for_tracked_diff(monkeypatch, tmp_path: Path):
     def fake_run_git(project_root: Path, args: list[str]):
         if args == ["rev-parse", "--is-inside-work-tree"]:
