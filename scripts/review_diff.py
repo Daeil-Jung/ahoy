@@ -48,9 +48,21 @@ def load_config(project_root: Path) -> dict:
 
 
 def collect_git_diff(project_root: Path) -> str:
-    """Return staged+unstaged diff against HEAD, with no color or external diff."""
+    """Return tracked and untracked local diff, with no color or external diff."""
+    has_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=project_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    diff_args = ["git", "diff", "--no-ext-diff", "--no-color"]
+    if has_head:
+        diff_args.extend(["HEAD", "--"])
+    else:
+        diff_args.extend(["--cached", "--"])
     result = subprocess.run(
-        ["git", "diff", "--no-ext-diff", "--no-color", "HEAD", "--"],
+        diff_args,
         cwd=project_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -60,7 +72,37 @@ def collect_git_diff(project_root: Path) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git diff failed")
-    return result.stdout
+    return result.stdout + _collect_untracked_diff(project_root)
+
+
+def _collect_untracked_diff(project_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(stderr or "git ls-files failed")
+    paths = [p.decode("utf-8", errors="surrogateescape") for p in result.stdout.split(b"\0") if p]
+    chunks: list[str] = []
+    for path in paths:
+        diff = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--no-color", "--no-index", "--", os.devnull, path],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if diff.returncode not in {0, 1}:
+            raise RuntimeError(diff.stderr.strip() or f"git diff failed for untracked file {path}")
+        chunks.append(diff.stdout.replace(f"a/{os.devnull}", "a/dev/null"))
+    return "".join(chunks)
 
 
 def _diff_summary(diff_text: str) -> dict:
@@ -196,6 +238,31 @@ def mode_min_models(mode: str, configured_min: int, explicit_min: int | None) ->
     return max(2, int(configured_min or 2))
 
 
+def _configured_min_models(config: dict) -> int:
+    value = config.get("min_models", 2)
+    if isinstance(value, bool):
+        raise ValueError("min_models must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError("min_models must be an integer")
+
+
+def _selected_models(models: list[str] | None, config: dict) -> list[str]:
+    raw_models = models if models is not None else config.get("eval_models", ["codex", "claude"])
+    if not isinstance(raw_models, list):
+        raise ValueError("eval_models must be a list of strings")
+    selected: list[str] = []
+    for model in raw_models:
+        if not isinstance(model, str):
+            raise ValueError("eval_models entries must be strings")
+        name = model.strip()
+        if name:
+            selected.append(name)
+    return selected
+
+
 def render_report(result: dict) -> str:
     lines = [
         "# AHOY Review Diff Report",
@@ -230,6 +297,11 @@ def render_report(result: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def write_report_artifacts(result: dict, report_path: Path) -> None:
+    report_path.write_text(render_report(result), encoding="utf-8")
+    report_path.with_suffix(report_path.suffix + ".json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def run_review_diff(
     project_root: Path,
     mode: str = "advisory",
@@ -243,8 +315,8 @@ def run_review_diff(
     if mode not in VALID_MODES:
         raise ValueError(f"mode must be one of {sorted(VALID_MODES)}")
     config = load_config(project_root)
-    selected_models = [m.strip() for m in (models or config.get("eval_models", ["codex", "claude"])) if m.strip()]
-    minimum = mode_min_models(mode, int(config.get("min_models", 2)), min_models)
+    selected_models = _selected_models(models, config)
+    minimum = mode_min_models(mode, _configured_min_models(config), min_models)
     report_path = report_path or (project_root / DEFAULT_REPORT)
     if not report_path.is_absolute():
         report_path = project_root / report_path
@@ -252,7 +324,7 @@ def run_review_diff(
     diff_text = collect_git_diff(project_root)
     summary = _diff_summary(diff_text)
     if not diff_text.strip():
-        return {
+        result = {
             "workflow": "review-diff",
             "mode": mode,
             "status": "no_diff",
@@ -263,7 +335,10 @@ def run_review_diff(
             "min_models": minimum,
             "diff_summary": summary,
             "summary": "No git diff to review.",
+            "report_path": str(report_path),
         }
+        write_report_artifacts(result, report_path)
+        return result
 
     prompt = build_review_prompt(diff_text, mode, summary)
     verdicts: dict[str, dict] = {}
@@ -295,8 +370,7 @@ def run_review_diff(
     }
     if consensus.get("reason"):
         result["error_reason"] = consensus["reason"]
-    report_path.write_text(render_report(result), encoding="utf-8")
-    report_path.with_suffix(report_path.suffix + ".json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_report_artifacts(result, report_path)
     return result
 
 

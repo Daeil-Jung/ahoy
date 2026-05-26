@@ -50,7 +50,59 @@ def test_review_diff_reports_no_diff_without_creating_harness_state(tmp_path: Pa
     assert result["status"] == "no_diff"
     assert result["verdict"] == "no_diff"
     assert "no git diff" in result["summary"].lower()
+    assert result["report_path"] == str(tmp_path / "review.md")
+    assert (tmp_path / "review.md").exists()
+    assert (tmp_path / "review.md.json").exists()
     assert not (tmp_path / ".claude" / "harness").exists()
+
+
+def test_review_diff_includes_untracked_files_in_prompt(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "new_feature.py").write_text("print('new')\n", encoding="utf-8")
+    command = fake_evaluator(tmp_path.parent / "fake_eval_untracked.py")
+
+    result = review_diff.run_review_diff(tmp_path, mode="advisory", models=["fake"], evaluator_command=command, report_path=tmp_path / "review.md")
+
+    assert result["status"] == "passed"
+    assert result["diff_summary"]["files_changed"] == ["new_feature.py"]
+    assert result["diff_summary"]["additions"] == 1
+
+
+def test_review_diff_handles_unborn_head_repo_with_untracked_file(tmp_path: Path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "first.txt").write_text("first\n", encoding="utf-8")
+    command = fake_evaluator(tmp_path.parent / "fake_eval_unborn.py")
+
+    result = review_diff.run_review_diff(tmp_path, mode="advisory", models=["fake"], evaluator_command=command, report_path=tmp_path / "review.md")
+
+    assert result["status"] == "passed"
+    assert "first.txt" in result["diff_summary"]["files_changed"]
+
+
+def test_review_diff_rejects_non_integer_config_min_models_with_clear_error(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    (tmp_path / "ahoy_config.json").write_text(json.dumps({"eval_models": ["fake"], "min_models": "two"}), encoding="utf-8")
+
+    try:
+        review_diff.run_review_diff(tmp_path, mode="strict", evaluator_command="python -c 'raise SystemExit(99)'", report_path=tmp_path / "review.md")
+    except ValueError as exc:
+        assert "min_models must be an integer" in str(exc)
+    else:
+        raise AssertionError("expected invalid min_models config to raise ValueError")
+
+
+def test_review_diff_rejects_non_string_config_eval_models_with_clear_error(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    (tmp_path / "ahoy_config.json").write_text(json.dumps({"eval_models": ["fake", 42], "min_models": 1}), encoding="utf-8")
+
+    try:
+        review_diff.run_review_diff(tmp_path, mode="advisory", evaluator_command="python -c 'raise SystemExit(99)'", report_path=tmp_path / "review.md")
+    except ValueError as exc:
+        assert "eval_models entries must be strings" in str(exc)
+    else:
+        raise AssertionError("expected invalid eval_models config to raise ValueError")
 
 
 def test_review_diff_advisory_mode_accepts_one_evaluator_and_writes_report(tmp_path: Path):
