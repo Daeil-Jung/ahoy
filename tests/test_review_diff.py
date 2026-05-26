@@ -79,6 +79,30 @@ def test_review_diff_handles_unborn_head_repo_with_untracked_file(tmp_path: Path
     assert "first.txt" in result["diff_summary"]["files_changed"]
 
 
+def test_review_diff_includes_unstaged_hunks_when_head_is_unborn(tmp_path: Path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "first.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "first.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "first.txt").write_text("staged\nunstaged\n", encoding="utf-8")
+    command = fake_evaluator(tmp_path.parent / "fake_eval_unborn_unstaged.py")
+
+    result = review_diff.run_review_diff(tmp_path, mode="advisory", models=["fake"], evaluator_command=command, report_path=tmp_path / "review.md")
+
+    assert result["status"] == "passed"
+    assert result["diff_summary"]["files_changed"] == ["first.txt"]
+    assert result["diff_summary"]["additions"] == 2
+
+
+def test_review_diff_summary_handles_paths_with_spaces(tmp_path: Path):
+    summary = review_diff._diff_summary(
+        "diff --git a/path with spaces.txt b/path with spaces.txt\n"
+        "+++ b/path with spaces.txt\n"
+        "+new line\n"
+    )
+
+    assert summary["files_changed"] == ["path with spaces.txt"]
+
+
 def test_review_diff_rejects_non_integer_config_min_models_with_clear_error(tmp_path: Path):
     init_repo(tmp_path)
     (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
@@ -103,6 +127,33 @@ def test_review_diff_rejects_non_string_config_eval_models_with_clear_error(tmp_
         assert "eval_models entries must be strings" in str(exc)
     else:
         raise AssertionError("expected invalid eval_models config to raise ValueError")
+
+
+def test_review_diff_strict_mode_keeps_two_model_minimum_even_with_explicit_one(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    command = fake_evaluator(tmp_path / "fake_eval.py")
+
+    result = review_diff.run_review_diff(tmp_path, mode="strict", models=["fake"], evaluator_command=command, min_models=1, report_path=tmp_path / "review.md")
+
+    assert result["status"] == "error"
+    assert result["min_models"] == 2
+
+
+def test_review_diff_cli_returns_structured_error_for_runtime_failures(tmp_path: Path, monkeypatch, capsys):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    (tmp_path / "ahoy_config.json").write_text(json.dumps({"eval_models": [42], "min_models": 1}), encoding="utf-8")
+    monkeypatch.setattr(
+        review_diff.sys,
+        "argv",
+        ["review_diff.py", "--project-root", str(tmp_path), "--report", str(tmp_path / "review.md")],
+    )
+
+    assert review_diff.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert "eval_models entries must be strings" in payload["error_reason"]
 
 
 def test_review_diff_advisory_mode_accepts_one_evaluator_and_writes_report(tmp_path: Path):
@@ -171,9 +222,10 @@ def test_review_diff_cli_accepts_strict_shortcut_flag(tmp_path: Path, monkeypatc
         ],
     )
 
-    assert review_diff.main() == 0
+    assert review_diff.main() == 2
     payload = json.loads((tmp_path / "review.md.json").read_text(encoding="utf-8"))
     assert payload["mode"] == "strict"
+    assert payload["min_models"] == 2
 
 
 def test_review_diff_cli_emits_json_for_advisory(tmp_path: Path, monkeypatch):

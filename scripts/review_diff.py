@@ -32,6 +32,7 @@ eval_dispatch = _load_eval_dispatch()
 
 VALID_MODES = {"advisory", "strict"}
 DEFAULT_REPORT = "ahoy_review_diff_report.md"
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 def load_config(project_root: Path) -> dict:
@@ -60,7 +61,7 @@ def collect_git_diff(project_root: Path) -> str:
     if has_head:
         diff_args.extend(["HEAD", "--"])
     else:
-        diff_args.extend(["--cached", "--"])
+        diff_args.extend([EMPTY_TREE, "--"])
     result = subprocess.run(
         diff_args,
         cwd=project_root,
@@ -111,10 +112,9 @@ def _diff_summary(diff_text: str) -> dict:
     deletions = 0
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            parts = line.split()
-            if len(parts) >= 4:
-                path = parts[3]
-                files.append(path[2:] if path.startswith("b/") else path)
+            path = _path_from_diff_header(line)
+            if path:
+                files.append(path)
         elif line.startswith("+") and not line.startswith("+++"):
             additions += 1
         elif line.startswith("-") and not line.startswith("---"):
@@ -125,6 +125,14 @@ def _diff_summary(diff_text: str) -> dict:
         "additions": additions,
         "deletions": deletions,
     }
+
+
+def _path_from_diff_header(line: str) -> str:
+    header = line.removeprefix("diff --git ")
+    if " b/" not in header:
+        return ""
+    path = "b/" + header.split(" b/", 1)[1]
+    return path[2:] if path.startswith("b/") else path
 
 
 def build_review_prompt(diff_text: str, mode: str, summary: dict) -> str:
@@ -231,11 +239,12 @@ def call_reviewer(model: str, prompt: str, project_root: Path, evaluator_command
 
 
 def mode_min_models(mode: str, configured_min: int, explicit_min: int | None) -> int:
-    if explicit_min is not None:
-        return explicit_min
     if mode == "advisory":
+        if explicit_min is not None:
+            return explicit_min
         return 1
-    return max(2, int(configured_min or 2))
+    strict_min = explicit_min if explicit_min is not None else configured_min
+    return max(2, int(strict_min or 2))
 
 
 def _configured_min_models(config: dict) -> int:
@@ -397,15 +406,32 @@ def main() -> int:
 
     models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
     mode = "strict" if args.strict else "advisory" if args.advisory else args.mode or "advisory"
-    result = run_review_diff(
-        Path(args.project_root),
-        mode=mode,
-        models=models,
-        evaluator_command=args.evaluator_command,
-        min_models=args.min_models,
-        report_path=Path(args.report),
-        timeout=args.timeout,
-    )
+    try:
+        result = run_review_diff(
+            Path(args.project_root),
+            mode=mode,
+            models=models,
+            evaluator_command=args.evaluator_command,
+            min_models=args.min_models,
+            report_path=Path(args.report),
+            timeout=args.timeout,
+        )
+    except Exception as exc:
+        result = {
+            "workflow": "review-diff",
+            "mode": mode,
+            "status": "error",
+            "verdict": "error",
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            "error_reason": str(exc),
+            "summary": "review-diff failed before completion",
+            "report_path": str(Path(args.report)),
+        }
+        report_path = Path(args.report)
+        if not report_path.is_absolute():
+            report_path = Path(args.project_root).resolve() / report_path
+        result["report_path"] = str(report_path)
+        write_report_artifacts(result, report_path)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] in {"passed", "no_diff"}:
         return 0
