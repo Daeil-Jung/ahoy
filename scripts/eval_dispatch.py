@@ -16,6 +16,7 @@ Supported models:
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures
 import json
 import os
@@ -459,10 +460,7 @@ def _has_git_head(project_root: Path) -> bool:
 
 
 def _empty_git_tree(project_root: Path) -> str:
-    proc = _run_git(project_root, ["hash-object", "-t", "tree", "/dev/null"])
-    if proc.returncode != 0:
-        raise ValueError(f"Failed to resolve empty git tree: {(proc.stderr or '').strip()[:200]}")
-    return proc.stdout.strip()
+    return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 def _is_harness_artifact_path(rel_path: str) -> bool:
@@ -470,12 +468,29 @@ def _is_harness_artifact_path(rel_path: str) -> bool:
 
 
 def _filter_source_changes(changes: list[dict[str, str]]) -> list[dict[str, str]]:
-    return [
-        change
-        for change in changes
-        if not _is_harness_artifact_path(change["path"])
-        and not (change.get("old_path") and _is_harness_artifact_path(change["old_path"]))
-    ]
+    source_changes: list[dict[str, str]] = []
+    for change in changes:
+        path_is_harness = _is_harness_artifact_path(change["path"])
+        old_path = change.get("old_path", "")
+        old_path_is_harness = bool(old_path and _is_harness_artifact_path(old_path))
+        if not path_is_harness and not old_path_is_harness:
+            source_changes.append(change)
+        elif path_is_harness and old_path and not old_path_is_harness:
+            source_changes.append({"status": " D", "type": "deleted", "path": old_path, "old_path": ""})
+        elif old_path_is_harness and not path_is_harness:
+            source_changes.append({"status": "A ", "type": "created", "path": change["path"], "old_path": ""})
+    return source_changes
+
+
+def _decode_porcelain_path(path: str) -> str:
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        try:
+            decoded = ast.literal_eval(path)
+        except (SyntaxError, ValueError):
+            return path
+        if isinstance(decoded, str):
+            return decoded
+    return path
 
 
 def _parse_porcelain_status(status_output: str) -> list[dict[str, str]]:
@@ -489,6 +504,8 @@ def _parse_porcelain_status(status_output: str) -> list[dict[str, str]]:
         path = path_text
         if " -> " in path_text:
             old_path, path = path_text.split(" -> ", 1)
+        old_path = _decode_porcelain_path(old_path) if old_path else ""
+        path = _decode_porcelain_path(path)
         change_type = "modified"
         if status == "??":
             change_type = "untracked"
@@ -523,6 +540,8 @@ def _untracked_file_diff(project_root: Path, rel_path: str) -> str:
     file_path = project_root / rel_path
     header = f"diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel_path}\n"
     try:
+        if file_path.is_symlink():
+            return header + f"[AHOY diff omitted: {rel_path} is a symlink]\n"
         if file_path.stat().st_size > MAX_DIFF_FILE_BYTES:
             return header + f"[AHOY diff truncated: {rel_path} exceeded {MAX_DIFF_FILE_BYTES} bytes]\n"
         content = file_path.read_text(encoding="utf-8")
@@ -584,7 +603,7 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
         parts.append(f"- [AHOY file list truncated: {omitted} additional changed path(s) omitted]")
 
     reported = set(reported_files)
-    actual = set(paths)
+    actual = {change["path"] for change in changes}
     missing_from_report = sorted(actual - reported)
     report_only = sorted(reported - actual)
     if missing_from_report or report_only:

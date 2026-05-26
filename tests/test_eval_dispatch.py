@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -214,6 +215,75 @@ def test_collect_code_snippets_uses_git_truth_in_unborn_head_repo(tmp_path: Path
     assert "src/feature.py" in snippets
     assert "print('new repo')" in snippets
     assert "fatal: ambiguous argument 'HEAD'" not in snippets
+
+
+def test_empty_git_tree_is_platform_independent_without_filesystem_sentinel(monkeypatch, tmp_path: Path):
+    def fail_run_git(project_root: Path, args: list[str]):
+        raise AssertionError(f"empty tree lookup should not shell out to git with {args}")
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fail_run_git)
+
+    assert eval_dispatch._empty_git_tree(tmp_path) == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def test_parse_porcelain_status_decodes_c_quoted_paths():
+    changes = eval_dispatch._parse_porcelain_status('?? "docs/path with spaces.md"\n M "src/quote\\"file.py"\n')
+
+    assert changes[0]["path"] == "docs/path with spaces.md"
+    assert changes[1]["path"] == 'src/quote"file.py'
+
+
+def test_untracked_file_diff_does_not_follow_symlink_targets(tmp_path: Path):
+    target = tmp_path / "outside-secret.txt"
+    target.write_text("do not leak\n", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    link = project_root / "linked.txt"
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available on this platform")
+
+    diff = eval_dispatch._untracked_file_diff(project_root, "linked.txt")
+
+    assert "do not leak" not in diff
+    assert "[AHOY diff omitted: linked.txt is a symlink]" in diff
+
+
+def test_filter_source_changes_preserves_source_deletion_when_renamed_into_harness():
+    filtered = eval_dispatch._filter_source_changes(
+        [
+            {
+                "status": "R ",
+                "type": "renamed",
+                "old_path": "src/feature.py",
+                "path": ".claude/harness/sprints/sprint-001/feature.py",
+            }
+        ]
+    )
+
+    assert filtered == [{"status": " D", "type": "deleted", "old_path": "", "path": "src/feature.py"}]
+
+
+def test_report_mismatch_ignores_rename_old_path_when_new_path_is_reported(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    (project_root / "src").mkdir()
+    old_path = project_root / "src" / "old.py"
+    old_path.write_text("print('same')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "src/old.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "mv", "src/old.py", "src/new.py"], cwd=project_root, check=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/new.py`\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "src/old.py" in snippets
+    assert "Changed in git but missing from gen_report.md:\n- `src/old.py`" not in snippets
 
 
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):
