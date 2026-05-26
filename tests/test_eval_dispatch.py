@@ -174,6 +174,48 @@ def test_collect_code_snippets_marks_deleted_renamed_and_truncated_untracked_fil
     assert "[AHOY diff truncated" in snippets
 
 
+def test_collect_code_snippets_excludes_harness_artifacts_from_git_truth(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    source_file = project_root / "src" / "feature.py"
+    sprint_dir.mkdir(parents=True)
+    source_file.parent.mkdir(parents=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/feature.py`\n", encoding="utf-8")
+    source_file.write_text("print('old')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "add", "src/feature.py"], cwd=project_root, check=True)
+    eval_dispatch.subprocess.run(["git", "commit", "-m", "base"], cwd=project_root, check=True, capture_output=True, text=True)
+    source_file.write_text("print('new')\n", encoding="utf-8")
+    (sprint_dir / "issues.json").write_text("[]\n", encoding="utf-8")
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "src/feature.py" in snippets
+    assert ".claude/harness" not in snippets
+    assert "gen_report.md" not in snippets
+    assert "issues.json" not in snippets
+
+
+def test_collect_code_snippets_uses_git_truth_in_unborn_head_repo(tmp_path: Path):
+    project_root = tmp_path / "project"
+    sprint_dir = project_root / ".claude" / "harness" / "sprints" / "sprint-001"
+    sprint_dir.mkdir(parents=True)
+    (sprint_dir / "gen_report.md").write_text("### Files Modified\n- `src/feature.py`\n", encoding="utf-8")
+    source_file = project_root / "src" / "feature.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("print('new repo')\n", encoding="utf-8")
+    eval_dispatch.subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True, text=True)
+
+    snippets = eval_dispatch.collect_code_snippets(sprint_dir, project_root)
+
+    assert "## Git Diff Source of Truth" in snippets
+    assert "src/feature.py" in snippets
+    assert "print('new repo')" in snippets
+    assert "fatal: ambiguous argument 'HEAD'" not in snippets
+
+
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):
     sprint_dir = tmp_path / "sprint-001"
     sprint_dir.mkdir()
