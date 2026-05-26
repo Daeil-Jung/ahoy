@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -129,6 +130,15 @@ def _diff_summary(diff_text: str) -> dict:
 
 def _path_from_diff_header(line: str) -> str:
     header = line.removeprefix("diff --git ")
+    if '"' in header:
+        try:
+            parts = shlex.split(header)
+        except ValueError:
+            return ""
+        if len(parts) >= 2:
+            path = parts[1]
+            return path[2:] if path.startswith("b/") else path
+        return ""
     if " b/" not in header:
         return ""
     path = "b/" + header.split(" b/", 1)[1]
@@ -214,6 +224,35 @@ def _run_evaluator_command(command: str, prompt: str, cwd: Path, model: str, tim
     return result.stdout
 
 
+def _normalize_reviewer_payload(parsed: dict, model: str) -> dict:
+    verdict = parsed.get("verdict")
+    if not isinstance(verdict, str) or not verdict.strip():
+        return {
+            "verdict": "error",
+            "error": f"{model} response missing required verdict",
+            "issues": [],
+            "passed_criteria": [],
+            "failed_criteria": [],
+            "summary": f"{model} review failed schema validation",
+        }
+    normalized = verdict.strip().lower()
+    if normalized not in {"pass", "partial_pass", "fail", "error"}:
+        return {
+            "verdict": "error",
+            "error": f"{model} response used unsupported verdict: {verdict!r}",
+            "issues": [],
+            "passed_criteria": [],
+            "failed_criteria": [],
+            "summary": f"{model} review failed schema validation",
+        }
+    parsed["verdict"] = normalized
+    parsed.setdefault("issues", [])
+    parsed.setdefault("passed_criteria", [])
+    parsed.setdefault("failed_criteria", [])
+    parsed.setdefault("summary", f"{model} review complete")
+    return parsed
+
+
 def call_reviewer(model: str, prompt: str, project_root: Path, evaluator_command: str | None, timeout: int) -> tuple[str, dict, str]:
     try:
         raw = (
@@ -234,6 +273,7 @@ def call_reviewer(model: str, prompt: str, project_root: Path, evaluator_command
             "summary": "Response parsing failed",
         }
     else:
+        parsed = _normalize_reviewer_payload(parsed, model)
         parsed = eval_dispatch.validate_objections(parsed, model)
     return model, parsed, raw
 
@@ -307,8 +347,19 @@ def render_report(result: dict) -> str:
 
 
 def write_report_artifacts(result: dict, report_path: Path) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(render_report(result), encoding="utf-8")
     report_path.with_suffix(report_path.suffix + ".json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _error_report_path(report_arg: str, project_root_arg: str) -> Path:
+    report_path = Path(report_arg)
+    if report_path.is_absolute():
+        return report_path
+    project_root = Path(project_root_arg).resolve()
+    if project_root.exists():
+        return project_root / report_path
+    return Path.cwd() / report_path
 
 
 def run_review_diff(
@@ -427,9 +478,7 @@ def main() -> int:
             "summary": "review-diff failed before completion",
             "report_path": str(Path(args.report)),
         }
-        report_path = Path(args.report)
-        if not report_path.is_absolute():
-            report_path = Path(args.project_root).resolve() / report_path
+        report_path = _error_report_path(args.report, args.project_root)
         result["report_path"] = str(report_path)
         write_report_artifacts(result, report_path)
     print(json.dumps(result, ensure_ascii=False, indent=2))

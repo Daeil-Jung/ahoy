@@ -103,6 +103,73 @@ def test_review_diff_summary_handles_paths_with_spaces(tmp_path: Path):
     assert summary["files_changed"] == ["path with spaces.txt"]
 
 
+def test_review_diff_summary_handles_quoted_diff_headers(tmp_path: Path):
+    summary = review_diff._diff_summary(
+        'diff --git "a/docs/한글 파일.md" "b/docs/한글 파일.md"\n'
+        '+++ "b/docs/한글 파일.md"\n'
+        "+new line\n"
+    )
+
+    assert summary["files_changed"] == ["docs/한글 파일.md"]
+
+
+def test_review_diff_normalizes_uppercase_failure_verdict(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    command = fake_evaluator(tmp_path / "fake_eval_upper_fail.py", verdict="FAIL")
+
+    result = review_diff.run_review_diff(tmp_path, mode="advisory", models=["fake"], evaluator_command=command, report_path=tmp_path / "review.md")
+
+    assert result["verdict"] == "fail"
+    assert result["status"] == "failed"
+    assert result["models_valid"] == ["fake"]
+
+
+def test_review_diff_treats_missing_verdict_as_model_error_without_aborting_valid_advisory_model(tmp_path: Path):
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+    evaluator = tmp_path / "mixed_eval.py"
+    evaluator.write_text(
+        "import json, os, sys\n"
+        "sys.stdin.read()\n"
+        "if os.environ['AHOY_REVIEW_DIFF_MODEL'] == 'bad':\n"
+        "    print(json.dumps({'summary': 'missing verdict'}))\n"
+        "else:\n"
+        "    print(json.dumps({'verdict': 'pass', 'objections': ['ok'], 'issues': [], 'passed_criteria': ['DIFF-REVIEW'], 'failed_criteria': [], 'summary': 'good'}))\n",
+        encoding="utf-8",
+    )
+
+    result = review_diff.run_review_diff(
+        tmp_path,
+        mode="advisory",
+        models=["bad", "good"],
+        evaluator_command=f"python {evaluator}",
+        min_models=1,
+        report_path=tmp_path / "review.md",
+    )
+
+    assert result["status"] == "passed"
+    assert result["models_valid"] == ["good"]
+    assert result["model_verdicts"]["bad"]["verdict"] == "error"
+
+
+def test_review_diff_cli_uses_existing_cwd_for_relative_error_report_when_project_root_is_missing(tmp_path: Path, monkeypatch, capsys):
+    missing_root = tmp_path / "does-not-exist"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        review_diff.sys,
+        "argv",
+        ["review_diff.py", "--project-root", str(missing_root), "--report", "out.md"],
+    )
+
+    assert review_diff.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["report_path"] == str(tmp_path / "out.md")
+    assert (tmp_path / "out.md").exists()
+    assert (tmp_path / "out.md.json").exists()
+
+
 def test_review_diff_rejects_non_integer_config_min_models_with_clear_error(tmp_path: Path):
     init_repo(tmp_path)
     (tmp_path / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
