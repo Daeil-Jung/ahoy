@@ -218,9 +218,9 @@ def test_collect_code_snippets_uses_git_truth_in_unborn_head_repo(tmp_path: Path
     assert "fatal: ambiguous argument 'HEAD'" not in snippets
 
 
-def test_empty_git_tree_is_platform_independent_without_filesystem_sentinel(monkeypatch, tmp_path: Path):
+def test_empty_git_tree_falls_back_to_sha1_when_hash_object_fails(monkeypatch, tmp_path: Path):
     def fail_run_git(project_root: Path, args: list[str]):
-        raise AssertionError(f"empty tree lookup should not shell out to git with {args}")
+        return eval_dispatch.subprocess.CompletedProcess(args, 1, "", "hash-object failed")
 
     monkeypatch.setattr(eval_dispatch, "_run_git", fail_run_git)
 
@@ -293,11 +293,11 @@ def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_read
     def fake_run_git(project_root: Path, args: list[str]):
         if args == ["rev-parse", "--is-inside-work-tree"]:
             return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
-        if args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
             return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
         if args == ["rev-parse", "--verify", "HEAD"]:
             return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
-        if args and args[0] == "diff":
+        if "diff" in args:
             assert "--no-ext-diff" in args
             output_args = [arg for arg in args if arg.startswith("--output=")]
             assert output_args, f"git diff should write to a file before Python reads/truncates output: {args}"
@@ -311,6 +311,105 @@ def test_collect_git_diff_context_writes_tracked_diff_to_output_file_before_read
     context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
 
     assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_collect_git_diff_context_disables_textconv_for_tracked_diff(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            assert "--no-textconv" in args
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_collect_git_diff_context_disables_fsmonitor_for_status(monkeypatch, tmp_path: Path):
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if "status" in args:
+            assert args[:3] == ["-c", "core.fsmonitor=false", "status"]
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, " M tracked.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("diff --git a/tracked.py b/tracked.py\n", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, ["tracked.py"])
+
+    assert "diff --git a/tracked.py b/tracked.py" in context
+
+
+def test_empty_git_tree_uses_repository_object_format(tmp_path: Path):
+    init = eval_dispatch.subprocess.run(
+        ["git", "init", "--object-format=sha256"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    if init.returncode != 0:
+        pytest.skip("git does not support sha256 repositories")
+
+    expected = eval_dispatch.subprocess.run(
+        ["git", "hash-object", "-t", "tree", "/dev/null"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    empty_tree = eval_dispatch._empty_git_tree(tmp_path)
+
+    assert len(empty_tree) == 64
+    assert empty_tree == expected
+
+
+def test_collect_git_diff_context_stops_untracked_diff_collection_at_byte_limit(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+
+    def fake_run_git(project_root: Path, args: list[str]):
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "?? a.py\n?? b.py\n?? c.py\n", "")
+        if args == ["rev-parse", "--verify", "HEAD"]:
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if "diff" in args:
+            output_args = [arg for arg in args if arg.startswith("--output=")]
+            Path(output_args[0].split("=", 1)[1]).write_text("", encoding="utf-8")
+            return eval_dispatch.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    def fake_untracked_file_diff(project_root: Path, rel_path: str) -> str:
+        calls.append(rel_path)
+        return f"diff --git a/{rel_path} b/{rel_path}\n" + ("x" * 80)
+
+    monkeypatch.setattr(eval_dispatch, "_run_git", fake_run_git)
+    monkeypatch.setattr(eval_dispatch, "_untracked_file_diff", fake_untracked_file_diff)
+    monkeypatch.setattr(eval_dispatch, "MAX_DIFF_BYTES", 120)
+
+    context = eval_dispatch.collect_git_diff_context(tmp_path, [])
+
+    assert calls == ["a.py", "b.py"]
+    assert "[AHOY diff truncated: combined git diff exceeded 120 bytes]" in context
+    assert "c.py" not in calls
 
 
 def test_collect_code_snippets_requires_declared_and_existing_files(tmp_path: Path):

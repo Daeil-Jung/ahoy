@@ -462,6 +462,9 @@ def _has_git_head(project_root: Path) -> bool:
 
 
 def _empty_git_tree(project_root: Path) -> str:
+    proc = _run_git(project_root, ["hash-object", "-t", "tree", "/dev/null"])
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
     return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
@@ -569,7 +572,10 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
     if not _is_git_worktree(project_root):
         return None
 
-    status_proc = _run_git(project_root, ["status", "--porcelain=v1", "--untracked-files=all"])
+    status_proc = _run_git(
+        project_root,
+        ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    )
     if status_proc.returncode != 0:
         raise ValueError(f"Failed to inspect git status: {(status_proc.stderr or '').strip()[:200]}")
     changes = _filter_source_changes(_parse_porcelain_status(status_proc.stdout))
@@ -586,6 +592,7 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
                 "diff",
                 f"--output={diff_path}",
                 "--no-ext-diff",
+                "--no-textconv",
                 "--find-renames",
                 "--find-copies",
                 "--binary",
@@ -631,10 +638,19 @@ def collect_git_diff_context(project_root: Path, reported_files: list[str]) -> s
             parts.extend(f"- `{path}`" for path in report_only[:MAX_CHANGED_FILES])
 
     diff_parts = [tracked_diff_text]
+    diff_was_truncated = False
     for change in changes:
         if change["type"] == "untracked":
             diff_parts.append(_untracked_file_diff(project_root, change["path"]))
-    diff_text = _truncate_text("\n".join(part for part in diff_parts if part), MAX_DIFF_BYTES, "combined git diff")
+            combined_so_far = "\n".join(part for part in diff_parts if part)
+            if len(combined_so_far.encode("utf-8")) > MAX_DIFF_BYTES:
+                diff_was_truncated = True
+                break
+    combined_diff = "\n".join(part for part in diff_parts if part)
+    if diff_was_truncated:
+        diff_text = _truncate_text(combined_diff, MAX_DIFF_BYTES, "combined git diff")
+    else:
+        diff_text = combined_diff
     parts.append("\n### Unified Diff")
     parts.append(f"```diff\n{diff_text}\n```")
     return "\n".join(parts)
