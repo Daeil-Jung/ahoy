@@ -79,7 +79,13 @@ claude --plugin-dir /path/to/ahoy
 ## Usage
 
 ```bash
-# Start a new harness
+# Lightweight review of the current git diff; no sprint state is created
+/ahoy:review-diff
+
+# Strict diff review; requires configured evaluator quorum
+/ahoy:review-diff --strict
+
+# Start a new full sprint harness
 /ahoy <project request>
 
 # Resume an interrupted harness
@@ -90,6 +96,12 @@ claude --plugin-dir /path/to/ahoy
 /ahoy:ahoy-gen
 /ahoy:ahoy-eval
 ```
+
+### Review-diff vs full `/ahoy`
+
+Use `/ahoy:review-diff` when you already have local changes and want a compact external review of `git diff HEAD --` without `.claude/harness/sprints/...` state. Advisory mode can run with one evaluator; strict mode fails closed unless the configured quorum is available.
+
+Use full `/ahoy` when you need planning, sprint contracts, Generator/Evaluator separation, persistent `issues.json`, and the rework loop.
 
 ---
 
@@ -188,7 +200,8 @@ AHOY uses Claude Code **skills** (not legacy commands) for full plugin compatibi
 
 | Skill | Role | Description |
 |-------|------|-------------|
-| **`/ahoy`** | **Orchestrator** | **Full lifecycle management. The only skill you need** |
+| **`/ahoy`** | **Orchestrator** | **Full lifecycle management. The only skill you need for sprint mode** |
+| `/ahoy:review-diff` | Lightweight reviewer | Reviews current git diff without sprint state |
 | `/ahoy:ahoy-setup` | **Setup** | **Verify prerequisites and diagnose environment** |
 | `/ahoy:ahoy-plan` | Planner | Request → spec.md + sprint contracts |
 | `/ahoy:ahoy-gen` | Generator | Implements code/tests per contract.md (Claude) |
