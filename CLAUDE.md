@@ -6,7 +6,8 @@ Claude Code **plugin** — Generator-Evaluator separation with external model co
 
 | Skill | Description |
 |-------|-------------|
-| **`/ahoy`** | Orchestrator — full lifecycle (entry point) |
+| **`/ahoy`** | Orchestrator — full sprint lifecycle (entry point) |
+| `/ahoy:review-diff` | Lightweight reviewer — external review of current git diff without sprint state |
 | `/ahoy:ahoy-setup` | Setup — verify prerequisites and diagnose environment |
 | `/ahoy:ahoy-plan` | Planner — request → spec + sprint contracts |
 | `/ahoy:ahoy-gen` | Generator — implements code per contract (Claude) |
